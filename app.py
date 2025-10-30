@@ -4,7 +4,7 @@ import streamlit as st
 
 from database import create_database
 from project_classes import User,Vault,Pot,Transaction,Balances
-from project_functions import submit_transaction,print_slow,print_slow_nospace,int_validator,collect_date,convert_date,summary,create_pot,create_user,create_vault,create_profile,instructions,re_user,re_vaults,re_pots,re_transactions,re_balances,count_pots,count_transactions,count_vaults,transaction_summary,del_profile,del_vault,del_pot,del_transaction,user_exist,refresh_user_data,refresh_pot_vault_values,create_balance,balance_update,balance_summary,check_balances,auto_transaction,previous_balances_variable,active_pot_confirmation,pot_forecast, pot_dict
+from project_functions import submit_transaction,convert_date,summary,create_pot,create_user,create_vault,create_profile,instructions,re_user,re_vaults,re_pots,re_transactions,re_balances,count_pots,count_transactions,count_vaults,transaction_summary,del_profile,del_vault,del_pot,del_transaction,user_exist,refresh_user_data,refresh_pot_vault_values,create_balance,balance_update,balance_summary,check_balances,auto_transaction,previous_balances_variable,active_pot_confirmation,pot_forecast,pot_dict,update_pot
 from streamlit_option_menu import option_menu
 from tabulate import tabulate
 from time import sleep
@@ -56,11 +56,11 @@ st.set_page_config(layout="wide")
 
 # Create the horizontal menu
 selected = option_menu(
-    menu_title=None,  # No title for the menu itself
+    menu_title=None, 
     options=["Dashboard", "Budgets", "Transactions", "Instructions", "Account"],
     icons=["graph-up", "bar-chart", "currency-dollar", "question-circle", "gear"], 
-    menu_icon="cast",  # Optional icon for the menu button (if collapsed)
-    default_index=0,  # Default selected option
+    menu_icon="cast",  
+    default_index=0,
     orientation="horizontal",
     styles={
         "container": {"padding": "0!important", "background-color": "#fafafa"},
@@ -102,26 +102,28 @@ if selected == "Dashboard":
 
     with col2:
         #bank_balance
-        active_pot_2 = st.text_input("Current bank balance:", "100")
+        active_pot_2 = st.text_input("Current bank balance:", f"{balances.bank_balance}")
 
     with col3:
         #bank_currency
+        bank_currency = balances.bank_currency 
         active_pot_3 = st.selectbox(
             "Bank currency:",
             currency_list,
-            index=0,
+            index=currency_list.index(bank_currency)
         )
 
     with col4:
         #cash_balance
-        active_pot_4 = st.text_input("Current cash balance:", "5000")
+        active_pot_4 = st.text_input("Current cash balance:", f"{balances.cash_balance}")
 
     with col5:
         #cash_currency
+        cash_currency = balances.cash_currency
         active_pot_5 = st.selectbox(
             "Cash currency:",
             currency_list,
-            index=0,
+            index=currency_list.index(cash_currency),
         )
 
     # Create auto_transaction
@@ -149,6 +151,7 @@ elif selected == "Budgets":
             [
                 {
                     "Spend Type": "Daily expenses",
+                    "Pot_ID": None,
                     "Pot Name": None,
                     "Pot Budget": None,
                     "Pot Balance": None,
@@ -159,6 +162,7 @@ elif selected == "Budgets":
                 },
                 {
                     "Spend Type": "Miscellaneous",
+                    "Pot_ID": None,
                     "Pot Name": None,
                     "Pot Budget": None,
                     "Pot Balance": None,
@@ -175,6 +179,7 @@ elif selected == "Budgets":
             df_list_of_dicts.append(
                 {
                     "Spend Type": "Miscellaneous",  # Map to vaults
+                    "Pot_ID": pot.pot_id,
                     "Pot Name": pot.pot_name,
                     "Pot Budget": pot.amount,
                     "Pot Balance": pot.pot_value(),
@@ -207,7 +212,7 @@ elif selected == "Budgets":
     edited_df = st.data_editor(
         st.session_state.budget_data,
         num_rows="dynamic",
-        disabled=["Pot Balance", "Number of Days"],
+        disabled=["Pot_ID", "Pot Balance", "Number of Days"],
         key="budget_editor",
         column_config={
             "Spend Type": st.column_config.SelectboxColumn(
@@ -215,6 +220,7 @@ elif selected == "Budgets":
                 options=["Daily expenses", "Miscellaneous"],
                 default="Daily expenses",
             ),
+            "Pot_ID": st.column_config.NumberColumn("Pot_ID")
             "Pot Name": st.column_config.TextColumn("Pot Name"),
             "Pot Budget": st.column_config.NumberColumn("Pot Budget"),
             "Pot Balance": st.column_config.NumberColumn("Pot Balance"),
@@ -258,19 +264,49 @@ elif selected == "Budgets":
         st.rerun()
 
     # Submit Button
-    if st.button("Submit Updates", key="submit_btn"):
+    if st.button("Submit Updates", key="submit_btn"):    
         # Save
         final_df = edited_df.dropna(how="all").reset_index(drop=True)
         st.session_state.budget_data = final_df.copy()
 
         # Display success message
         msg = st.empty()
-        msg.success("Transaction submitted")
+        msg.success("Updates submitted")
         sleep(2)
         msg.empty()
 
         # Add DB submission logic here
-        #st.rerun()
+        # Compare dataframes. Add deleted pots to a set and use to delete from db
+        deleted_pot_ids = set(df["Pot_ID"]) - set(edited_df["Pot_ID"])
+        for pot in deleted_pot_ids:
+            del_pot(con,user,pots,username,pot)
+        
+        # Compare dataframes. Add new pots to a set and use to submit to the db
+        new_pot_ids = set(edited_df["Pot_ID"]) - set(df["Pot_ID"])
+        for pot in new_pot_ids:
+            # Create new pot object and insert into database
+            pot_count = count_pots(con)
+            spend_type = edited_df.loc[edited_df["Pot_ID"] == pot, "Spend Type"].iloc[0]
+            pot_name = edited_df.loc[edited_df["Pot_ID"] == pot, "Pot Name"].iloc[0]
+            pot_budget = edited_df.loc[edited_df["Pot_ID"] == pot, "Pot Budget"].iloc[0]
+            start_date = edited_df.loc[edited_df["Pot_ID"] == pot, "Start Date"].iloc[0]
+            end_date = edited_df.loc[edited_df["Pot_ID"] == pot, "End Date"].iloc[0]
+
+            pots[f"pot_{(pot_count + 1)}"] = create_pot(con,x,vaults,user,username,spend_type,pot_name,pot_budget,start_date,end_date)
+
+        # Iterate through edited df and UPDATE each row in the database
+        for row in edited_df.itertuples(index=False):
+            x = count_pots(con)
+            spend_type = row._asdict().get("Spend Type")
+            pot_id = row._asdict().get("Pot_ID")
+            pot_name = row._asdict().get("Pot Name")
+            pot_budget = row._asdict().get("Pot Budget")
+            start_date = row._asdict().get("Start Date")
+            end_date = row._asdict().get("End Date")
+
+            update_pot(con,x,vaults,user,username,spend_type,pot_id,pot_name,pot_budget,start_date,end_date)
+
+        st.rerun()
     
 elif selected == "Transactions":
     # Base data
