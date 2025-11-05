@@ -14,60 +14,105 @@ from time import sleep
 import warnings
 warnings.filterwarnings("ignore",message="The default datetime adapter is deprecated",category=DeprecationWarning)
     
-def auto_transaction(con,x,pots,vaults,user,username,balances,previous_balances,active_pot):
-    if active_pot == None:
+def auto_transaction(con, x, pots, vaults, user, username, balances, previous_balances, active_pot):
+    """
+    Automatically creates a transaction for the active pot based on changes in balances.
+    Prevents over-correction of pot balances and updates the pot's transactions in memory.
+
+    Parameters:
+        con: SQLite connection
+        x: last transaction ID (used for incrementing)
+        pots: dict of Pot objects
+        vaults: dict of Vault objects
+        user: User object
+        username: str
+        balances: current Balances object
+        previous_balances: previous Balances object
+        active_pot: str (name of the pot to adjust)
+    Returns:
+        Transaction object if created, else None
+    """
+    if active_pot is None:
         return None
+
+    # Calculate signed delta
+    delta = balances.combined_balance(balances) - previous_balances.combined_balance(previous_balances)
+    if delta == 0:
+        return None  # No change, exit
+
+    transaction_type = "in" if delta > 0 else "out"
+    amount = delta  # signed: +ve for in, -ve for out
+    date = datetime.datetime.now()
     manual_transaction = 0
-    date = datetime.datetime.today()
-    # Count existing transactions
-    start_transaction = x + 1
-    if start_transaction == None:
-        start_transaction = 1
-    transaction_name = f"auto_transaction_{active_pot}_{start_transaction}" 
 
-    # Collect transaction type
-    while True:
-        if balances.combined_balance(balances) == previous_balances.combined_balance(previous_balances):
-            return
-        elif balances.combined_balance(balances) < previous_balances.combined_balance(previous_balances):
-            transaction_type = "out"
-            break
-        else:
-            transaction_type = "in"
-            break
+    # Find the pot and vault
+    selected_pot = next((p for p in pots.values() if p.pot_name == active_pot and p.username == username), None)
+    if not selected_pot:
+        print(f"Pot '{active_pot}' not found.")
+        return None
 
-    # Calculate transaction amount
-    amount = (balances.combined_balance(balances) - previous_balances.combined_balance(previous_balances)) 
+    selected_vault = vaults.get(f"vault_{selected_pot.vault_id}")
+    if not selected_vault:
+        print(f"Vault for pot '{active_pot}' not found.")
+        return None
 
-    # Find the pot using a simple loop
-    selected_pot = None
-    selected_vault = None
-    for pot in pots.values():
-        if pot.pot_name == active_pot and pot.username == username: 
-            selected_pot = pot
-            selected_vault = vaults.get(f"vault_{pot.vault_id}")
-            break
+    # Cap the amount to avoid overfilling or overdrawing
+    if transaction_type == "in":
+        max_add = selected_pot.amount - selected_pot.pot_value()
+        amount = min(amount, max_add)
+    else:  # out
+        max_withdraw = -selected_pot.pot_value()  # negative
+        amount = max(amount, max_withdraw)
 
-    if selected_pot:
-        try:
-            #Input all information into the Class
-            transaction = Transaction(transaction_id=start_transaction,transaction_name=transaction_name,date=date,pot=selected_pot,vault=selected_vault,manual_transaction=manual_transaction,type=transaction_type,amount=amount,user=user)
-            transaction_data = [(start_transaction,transaction_name,date,selected_pot.pot_id,selected_vault.vault_id,manual_transaction,transaction_type,amount,username)]
-            if transaction:
-                # Save transaction to database
-                cur = con.cursor()
-                cur.executemany("INSERT INTO transactions VALUES(?,?,?,?,?,?,?,?,?)",transaction_data)
-                con.commit()
-                cur.close()
-            return transaction
+    if amount == 0:
+        return None  # Nothing to do
 
-        except ValueError as e:
-            print(f"Error: {e}")
-            
-        except Exception as e:  
-            print(f"An unexpected error occurred: {e}")
-    else:
-        print(f"pot '{active_pot}' not found. Please enter a valid pot name.")
+    # Generate transaction ID
+    cur = con.cursor()
+    cur.execute("SELECT MAX(transaction_id) FROM transactions")
+    start_transaction = (cur.fetchone()[0] or 0) + 1
+
+    transaction_name = f"auto_transaction_{active_pot}_{start_transaction}"
+
+    # Create Transaction object
+    transaction = Transaction(
+        transaction_id=start_transaction,
+        transaction_name=transaction_name,
+        date=date,
+        pot=selected_pot,
+        vault=selected_vault,
+        manual_transaction=manual_transaction,
+        type=transaction_type,
+        amount=amount,
+        user=user
+    )
+
+    # Add transaction to pot in memory
+    selected_pot.add_transaction(transaction)
+
+    # Insert transaction into DB
+    cur.execute(
+        "INSERT INTO transactions VALUES(?,?,?,?,?,?,?,?,?)",
+        (
+            start_transaction,
+            transaction_name,
+            date,
+            selected_pot.pot_id,
+            selected_vault.vault_id,
+            manual_transaction,
+            transaction_type,
+            amount,
+            username
+        )
+    )
+    con.commit()
+    cur.close()
+
+    # Update previous balances so next call won't repeat the same adjustment
+    previous_balances.bank_balance = balances.bank_balance
+    previous_balances.cash_balance = balances.cash_balance
+
+    return transaction
 
 def submit_transaction(con,x,pots,vaults,user,username,transaction_name,pot_name,date,amount,transaction_type):
     manual_transaction = 1
@@ -107,38 +152,50 @@ def submit_transaction(con,x,pots,vaults,user,username,transaction_name,pot_name
         print(f"pot '{pot_input}' not found. Please enter a valid pot name.")
 
 def convert_date(date_input):
-    """Convert string from DB to datetime, ignoring microseconds."""
-    import datetime
-
-    if isinstance(date_input, datetime.datetime):
-        return date_input.replace(microsecond=0)  # remove microseconds
-
-    if not date_input:
-        return datetime.datetime.today().replace(microsecond=0)
-
-    if isinstance(date_input, str):
-        # truncate microseconds if present
-        if "." in date_input:
-            date_input = date_input.split(".")[0]
-        try:
-            return datetime.datetime.strptime(date_input, "%Y-%m-%d %H:%M:%S")
-        except ValueError:
-            print(f"Warning: couldn't parse date_input={date_input!r}")
-            return datetime.datetime.today().replace(microsecond=0)
+    """
+    Convert a string in 'YYYY-MM-DD', or a pandas Timestamp
+    to a datetime.date object.
+    """
+    # If already a datetime.date, return as-is
+    if isinstance(date_input, datetime.date) and not isinstance(date_input, datetime.datetime):
+        return date_input
     
-    return datetime.datetime.today().replace(microsecond=0)
-        
+    # If pandas Timestamp, convert directly
+    if isinstance(date_input, pd.Timestamp):
+        return date_input.to_pydatetime().date()
+    
+    # If string, remove time part if present
+    if isinstance(date_input, str):
+        if ' ' in date_input:
+            date_input = date_input.split(' ')[0]
+
+        # Try 'YYYY-MM-DD' first
+        try:
+            return datetime.datetime.strptime(date_input, "%Y-%m-%d").date()
+        except ValueError:
+            pass
+    
+    # If not string or pandas Timestamp
+    raise TypeError(f"Invalid type for convert_date: {type(date_input)}. Expected str or pd.Timestamp.")
+    
 def summary(vaults, pots, dynamic_width=True):
     # Prepare data
     data = []
-    for i in vaults:
-        vault = vaults[i]
-        vault_amount = vault.initial_vault_value()
-        for j in pots:
-            if pots[j].vault == vault:
-                pot_value = pots[j].pot_value()
-                data.append(['Vault Name: ' + vault.vault_name + '\n' + 'Initial Amount: $' + f'{vault_amount}', pots[j].pot_name + f'\n${pot_value}', 'Initial Amount', pots[j].amount])
-                data.append(['Vault Name: ' + vault.vault_name + '\n' + 'Initial Amount: $' + f'{vault_amount}', pots[j].pot_name + f'\n${pot_value}', 'Remaining Balance', pot_value])
+    if len(pots) == 0:
+        pot_value = 0
+        vault_amount = 0
+        initial_amount = 0
+        data.append(['Vault Name: ' + '\n' + 'Initial Amount: $' + f'{vault_amount}', 'no pots created' + f'\n${pot_value}', 'Initial Amount', initial_amount])
+        data.append(['Vault Name: ' + '\n' + 'Initial Amount: $' + f'{vault_amount}', 'no pots created' + f'\n${pot_value}', 'Remaining Balance', pot_value])
+    else:
+        for i in vaults:
+            vault = vaults[i]
+            vault_amount = vault.initial_vault_value()
+            for j in pots:
+                if pots[j].vault == vault:
+                    pot_value = pots[j].pot_value()
+                    data.append(['Vault Name: ' + vault.vault_name + '\n' + 'Initial Amount: $' + f'{vault_amount}', pots[j].pot_name + f'\n${pot_value}', 'Initial Amount', pots[j].amount])
+                    data.append(['Vault Name: ' + vault.vault_name + '\n' + 'Initial Amount: $' + f'{vault_amount}', pots[j].pot_name + f'\n${pot_value}', 'Remaining Balance', pot_value])
 
     df = pd.DataFrame(data, columns=['Vault', 'Pot', 'Metric', 'Amount ($)'])
     pivot_df = df.pivot_table(index=['Vault', 'Pot'], columns='Metric', values='Amount ($)', fill_value=0).reset_index()
@@ -224,6 +281,9 @@ def summary(vaults, pots, dynamic_width=True):
         ncol=2,
     )
 
+    # Set low limit for amount as 0
+    ax.set_ylim(bottom=0)
+
     sns.despine(left=True, bottom=True)
     plt.tight_layout()
 
@@ -262,9 +322,6 @@ def create_pot(con,x,vaults,user,username,spend_type,pot_name,pot_budget,start_d
         cur = con.cursor()
         pot_id = x + 1
         amount = pot_budget
-        # Create date objects
-        start_date = convert_date(start_date)
-        end_date = convert_date(end_date) 
 
         #Input all information into the Class
         try:
@@ -285,34 +342,34 @@ def create_pot(con,x,vaults,user,username,spend_type,pot_name,pot_budget,start_d
             return print(f"Error: {e}, Please try again")
             
         except Exception as e:  
-            return print(f"An unexpected error occurred: {e}, Please try again")
+            return print(f"An unexpected error occurred when creating pot: {e}, Please try again")
 
     else:
-        return print(f"\nVault '{pot_vault}' not found. Please enter a valid vault name.")
+        return print(f"\nVault '{pot_vault}' not found when creating pot. Please enter a valid vault name.")
     
-
-def update_pot(con,x,vaults,user,username,spend_type,pot_id,pot_name,pot_budget,start_date,end_date): #FINISH UPDATING THIS FUNCTION
+def update_pot(con, x, vaults, user, username, spend_type, pot_id, pot_name, pot_budget, start_date, end_date):
     pot_vault = spend_type
     selected_vault = None
     for vault in vaults.values():
         if vault.vault_name == pot_vault and vault.username == username:
             selected_vault = vault
+
     if selected_vault:
         cur = con.cursor()
         amount = pot_budget
         # Create date objects
         start_date = convert_date(start_date)
-        end_date = convert_date(end_date) 
+        end_date = convert_date(end_date)
 
         try:
             pot = Pot(
                 pot_id=pot_id,
                 pot_name=pot_name,
                 vault=selected_vault,
-                amount=amount,
                 user=user,
                 start_date=start_date,
-                end_date=end_date
+                end_date=end_date,
+                amount=amount
             )
 
             if pot:
@@ -346,10 +403,9 @@ def update_pot(con,x,vaults,user,username,spend_type,pot_id,pot_name,pot_budget,
             print(f"Error: {e}. Please try again.")
 
         except Exception as e:
-            print(f"An unexpected error occurred: {e}. Please try again.")
-
+            print(f"An unexpected error occurred when updating pot: {e}. Please try again.")
     else:
-        print(f"\nVault '{pot_vault}' not found. Please enter a valid vault name.")
+        print(f"\nVault '{pot_vault}' not found when updating pot. Please enter a valid vault name.")
         
 def create_vault(con,x,user,username,vault_name):
     cur = con.cursor()
@@ -394,15 +450,29 @@ def create_profile(con):
     # Create Pot objects with valid data
     pots = {}
 
-    # Create Balances object
+    # Create Previous Balances object
+    balance_id = 0
+    date = datetime.datetime.today()
     bank_currency = "NZD"
     bank_balance = 0.00
     cash_currency = "NZD"
     cash_balance = 0.00
-    balances = create_balance(con,username,bank_currency,bank_balance,cash_currency,cash_balance)
+    previous_balances = Balances(balance_id,username,date,bank_currency,bank_balance,cash_currency,cash_balance)
+
+    # Create Balances object
+    balance_id = 1
+    date = datetime.datetime.today()
+    bank_currency = "NZD"
+    bank_balance = 0.00
+    cash_currency = "NZD"
+    cash_balance = 0.00
+    balances = Balances(balance_id,username,date,bank_currency,bank_balance,cash_currency,cash_balance)
+
+    # Submit Balances to DB
+    balance_update(con,previous_balances,balances,bank_balance,cash_balance)
 
     #refresh user data
-    vaults, vault_ids,pots,pot_ids,transactions,transaction_ids,balances = refresh_user_data(con,user,username)
+    vaults, vault_ids,pots,pot_ids,transactions,transaction_ids,balances,previous_balances = refresh_user_data(con,user,username)
     #refresh pot/vault values
     pots,vaults = refresh_pot_vault_values(pots,vaults)
 
@@ -410,128 +480,48 @@ def create_profile(con):
     print("\nSee below list of vaults and their summed values")
     summary(vaults,pots)
     return user,vaults, vault_ids,pots,pot_ids,transactions,transaction_ids,balances
-
-def create_balance(con,username,bank_currency,bank_balance,cash_currency,cash_balance):
-    # Create list of variables
-    balances_data = []
-
-    balances_data.append(username)
-    balances_data.append(bank_currency)
-    balances_data.append(cash_currency)
-    balances_data.append(bank_balance)
-    balances_data.append(cash_balance)
-
-    # Save balances to database
-    cur = con.cursor()
-    cur.execute("INSERT INTO balances VALUES(?,?,?,?,?)",balances_data)
-    con.commit()
-    cur.close()
-
-    # Create transaction instance
-    balances = Balances(username=username,bank_currency=bank_currency,cash_currency=cash_currency,bank_balance=bank_balance,cash_balance=cash_balance)
-
-    return balances
     
-def balance_update(con,balances,previous_balances,bank_balance,cash_balance):
-    # Update Object
+def balance_update(con, balances, bank_balance, cash_balance, pot_names_list, active_pot=None):
+    # New timestamp
+    date = datetime.datetime.today()
+    # Update object
+    balances.update_date(date)
     balances.update_bank_balance(bank_balance)
     balances.update_cash_balance(cash_balance)
+    if active_pot is not None:
+        balances.update_active_pot(balances,pot_names_list,active_pot)
 
-    # Create list of variables
-    balances_data = []
-
-    username = balances.username
-    balances_data.append(username)
-
-    bank_currency = balances.bank_currency
-    balances_data.append(bank_currency)
-
-    cash_currency = balances.cash_currency
-    balances_data.append(cash_currency)
-
-    bank_balance = balances.bank_balance
-    balances_data.append(bank_balance)
-
-    cash_balance = balances.cash_balance
-    balances_data.append(cash_balance)
-
-    # Save balances to database
     cur = con.cursor()
-    cur.execute("INSERT OR REPLACE INTO balances VALUES(?,?,?,?,?)",balances_data)
+
+    # Get the current highest balance_id for this user
+    cur.execute("SELECT MAX(balance_id) FROM balances WHERE username = ?", (balances.username,))
+    result = cur.fetchone()
+    max_balance_id = result[0] if result[0] is not None else 0
+
+    # New balance_id
+    new_balance_id = max_balance_id + 1
+
+    # Prepare data for insertion
+    balances_data = (
+        new_balance_id,
+        balances.username,
+        balances.date,
+        balances.bank_currency,
+        balances.cash_currency,
+        balances.bank_balance,
+        balances.cash_balance,
+        balances.active_pot
+    )
+
+    # Insert a new row
+    cur.execute("INSERT INTO balances VALUES (?,?,?,?,?,?,?,?)", balances_data)
     con.commit()
     cur.close()
-    
-    return balances,previous_balances
 
-def balance_summary(balances):
-    table = []
-    row = [balances.bank_balance,balances.bank_currency, balances.cash_balance, balances.cash_currency, balances.combined_balance(balances), balances.bank_currency]
-    table.append(row)
-    print("\n\033[1;31mBank & Cash Balances\033[0m")
-    print(f"\n{tabulate(table,headers=["Bank Balance","Currency","Cash Balance","Local Currency", "Combined Balance", "Currency"],tablefmt="heavy_grid")}\n")
-    return
+    # Update the object's balance_id to the new one
+    balances.balance_id = new_balance_id
 
-def check_balances(con,balances,previous_balances):
-    balance_summary(balances)
-    print("Is this accurate?")
-    while True:
-        balance_check = input("Enter Y or N: ").strip().upper()
-        if balance_check in ("Y", "N"):
-            break
-        else:
-            print("Invalid input. Please enter Y or N.")
-
-    if balance_check == "N":
-        #Preserve old balances object
-        previous_balances = previous_balances_variable(balances)
-        
-        # Bank
-        print("\nOK. Please enter your current bank balance:")
-        try:
-            bank_balance = float(input())
-        except ValueError:
-            print("That's not a valid balance. Please try again.")
-
-        # Cash
-        print("\nOK. Please enter your current cash balance:")
-        try:
-            cash_balance = float(input())
-        except ValueError:
-            print("That's not a valid balance. Please try again.")
-        
-        balances,previous_balances = balance_update(con,balances,previous_balances,bank_balance,cash_balance)
-        print("\nBalance updated")
-
-        return balances,previous_balances
-    
-    return balances,previous_balances
-
-def instructions():
-    return """In this program, your savings are organized into two categories: vaults and pots.
-
-- A vault is a collection of Pots
-- A pot represents an individual budget within a Vault
-
-For example, you might create a 'Travelling' vault
-to manage your holiday expenses. This vault could contain multiple pots, each
-representing a budget for a different destination. 
-
-Once you've set up your vaults and pots, the program will track your bank and cash balances via regular updates.
-Using this it automatically infers your recent expenditure and you can also enter transactions manually. 
-From this data, a "Forecasting" graph can be created in the summary section to see (based on today's date) if your 
-spending is on track with the pot's budget.
-
-
-After set-up or login, the programme enters an infinite loop where you can choose from the following options:
-
-1. "New" to submit a new item (profile, vaults, pots, transactions),
-2. "Update" to manually update your balances,
-3. "Summary" to get either a balance report or transactions summary,
-4. "Delete" to remove an item,
-6. "Instructions" to get further information on how to use Money Pots,
-6. "Exit" to terminate the programme
-
-We hope you enjoy using Money Pots!"""
+    return balances
 
 def re_user(con, name):
     cur = con.cursor()
@@ -584,6 +574,9 @@ def re_pots(con,vaults,vault_ids,user):
             vault = vaults[f"vault_{pot[2]}"]
             start_date = convert_date(pot[5])
             end_date = convert_date(pot[6])
+            # Convert dates
+            start_date = convert_date(start_date)
+            end_date = convert_date(end_date)
             # Create pot instance
             pot = Pot(pot_id=pot_id,pot_name=pot_name,vault=vault,amount=amount,user=user,start_date=start_date,end_date=end_date)
             # Add instance to pots object dictionary
@@ -627,16 +620,23 @@ def re_transactions(con,pots,vaults,pot_ids,user):
 def re_balances(con,username):
     cur = con.cursor()
     # Searcb the database for balances related to username
-    res = cur.execute("SELECT * FROM balances WHERE username = ?",(username,))
+    res = cur.execute("""
+        SELECT * FROM balances
+        WHERE username = ?
+        AND balance_id = (
+            SELECT MAX(balance_id) FROM balances WHERE username = ?
+        )
+    """, (username, username))
+
     returned_balances = res.fetchall()
     if not returned_balances:
         raise ValueError("No balances found for this user.")
 
     # Unpack the list and create variables
-    (username, bank_currency, cash_currency, bank_balance, cash_balance) = returned_balances[0]
+    (balance_id, username, date, bank_currency, cash_currency, bank_balance, cash_balance, active_pot) = returned_balances[0]
 
-    # Create transaction instance
-    balances = Balances(username=username,bank_currency=bank_currency,cash_currency=cash_currency,bank_balance=bank_balance,cash_balance=cash_balance)
+    # Create balance instance
+    balances = Balances(balance_id=balance_id,username=username,date=date,bank_currency=bank_currency,cash_currency=cash_currency,bank_balance=bank_balance,cash_balance=cash_balance,active_pot=active_pot)
     cur.close()
     return balances
 
@@ -680,6 +680,7 @@ def del_profile(con,user,username):
     try:
         # Delete all related data first
         cur = con.cursor()
+        cur.execute("DELETE FROM balances WHERE username = ?",(username,))
         cur.execute("DELETE FROM transactions WHERE username = ?",(username,))
         cur.execute("DELETE FROM pots WHERE username = ?",(username,))
         cur.execute("DELETE FROM vaults WHERE username = ?",(username,))
@@ -717,7 +718,7 @@ def del_vault(con,user,vaults,username,vault_name):
         print(f"Available vaults for {username}: {[v.vault_name for v in vaults.values() if v.username == username]}\n")
         return False
 
-def del_pot(con,user,pots,username,pot_id):
+def del_pot(con,user,pots,username,pot_names_dict,pot_id):
     # Search for the pot that matches both the name and the username
     selected_pot = None
     for pot in pots.values():
@@ -737,6 +738,9 @@ def del_pot(con,user,pots,username,pot_id):
         return True
 
     else:
+        if pot_id == None:
+            return False
+        pot_name = pot_names_dict[str(pot_id)]
         print(f"\nPot '{pot_name}' not found for user '{username}'.")
         print(f"Available pots for {username}: {[p.pot_name for p in pots.values() if p.username == username]}")
         return False
@@ -783,9 +787,11 @@ def refresh_user_data(con,user,username):
     transactions, transaction_ids = re_transactions(con,pots,vaults,pot_ids,user) if transaction_exists else ({}, [])
     #reinstantiate balances
     balances = re_balances(con,username)
+    #reinstantiate previous balances
+    previous_balances = previous_balances_variable(con,username)
     
     cur.close()
-    return vaults,vault_ids,pots,pot_ids,transactions,transaction_ids,balances
+    return vaults,vault_ids,pots,pot_ids,transactions,transaction_ids,balances,previous_balances
 
 def refresh_pot_vault_values(pots,vaults):
     for pot in pots.values():
@@ -794,56 +800,62 @@ def refresh_pot_vault_values(pots,vaults):
             vault.vault_value()
     return pots,vaults
 
-def previous_balances_variable(balances):
-    previous_balances = Balances(
-    username=balances.username,
-    bank_currency=balances.bank_currency,
-    cash_currency=balances.cash_currency,
-    bank_balance=balances.bank_balance,
-    cash_balance=balances.cash_balance
-    )
+def previous_balances_variable(con,username):
+    cur = con.cursor()
+    # Searcb the database for balance_id one less than max
+    res = cur.execute("""
+        SELECT * FROM balances
+        WHERE username = ?
+        ORDER BY balance_id DESC
+        LIMIT 1 OFFSET 1
+    """, (username,))
+
+    returned_balances = res.fetchall()
+    if not returned_balances:
+        raise ValueError("No balances found for this user.")
+
+    # Unpack the list and create variables
+    (balance_id,username, date, bank_currency, cash_currency, bank_balance, cash_balance, active_pot) = returned_balances[0]
+
+    # Create previous_balances instance
+    previous_balances = Balances(balance_id=balance_id,username=username,date=date,bank_currency=bank_currency,cash_currency=cash_currency,bank_balance=bank_balance,cash_balance=cash_balance,active_pot=active_pot)
+    cur.close()
     return previous_balances
-
-def active_pot_confirmation(pots):
-    while True:
-        print("\nPlease confirm the Pot you are currently using to withdraw funds")
-        active_pot = input()
-        if active_pot == "None":
-            active_pot = None
-            print(f"\nThanks, {active_pot} has been confirmed as your active pot")
-            return active_pot
-        pot_names = []
-        for pot in pots.values():
-            pot_names.append(pot.pot_name)
-        if active_pot in pot_names:
-            break
-        else:
-            print("\nPot name not found")
-
-    print(f"\nThanks, {active_pot} has been confirmed as your active pot")
-    return active_pot
 
 def pot_forecast(pots, pot_name, dynamic_width=True):
     # Assign pot to a variable
     pot = next((p for p in pots.values() if p.pot_name == pot_name), None)
     if pot is None:
-        raise KeyError(f"No pot found with name '{pot_name}'")
-    # Prepare forecast data
-    forecast_data = {}
-    start_date = pot.start_date
-    end_date = pot.end_date
-    date = start_date
-    amount = pot.amount
-    while date <= end_date:
-        forecast_data[date] = amount
-        date += timedelta(days=1)
-        amount -= pot.daily_expenditure
+        forecast_data = {}
+        start_date = convert_date("2025-01-01")
+        end_date = convert_date("2025-03-01")
+        date = start_date
+        amount = 0.00
+        while date <= end_date:
+            forecast_data[date] = amount
+            date += timedelta(days=1)
+            amount -= 0
+    else:
+        # Prepare forecast data
+        forecast_data = {}
+        start_date = pot.start_date
+        end_date = pot.end_date
+        date = start_date
+        amount = pot.amount
+        while date <= end_date:
+            forecast_data[date] = amount
+            date += timedelta(days=1)
+            amount -= pot.daily_expenditure
 
     df = pd.DataFrame(list(forecast_data.items()), columns=["Date", "Forecast Balance"])
     
     # Prepare actual balance data
-    actual_balance = pot.pot_value()
-    actual_date = datetime.datetime.today()
+    if pot is None:
+        actual_balance = 0
+        actual_date = convert_date("2025-01-01")
+    else:
+        actual_balance = pot.pot_value()
+        actual_date = datetime.datetime.today()
 
     # --- Seaborn theme (match existing) ---
     sns.set_theme(style="darkgrid", palette="Blues_d")
@@ -871,9 +883,10 @@ def pot_forecast(pots, pot_name, dynamic_width=True):
                edgecolor="white", linewidth=1.5, zorder=5, label="Actual Balance")
 
     # --- Style axes ---
-    ax.set_title(f"Forecasted Pot Balance: {pot.pot_name}", pad=20)
+    ax.set_title(f"Active Pot Spending Forecast", pad=20)
     ax.set_xlabel("Date")
     ax.set_ylabel("Balance ($)")
+    ax.set_ylim(bottom=0)
 
     # Format date axis
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %d"))
@@ -891,34 +904,9 @@ def pot_forecast(pots, pot_name, dynamic_width=True):
     plt.tight_layout()
     
     return fig  # for Streamlit compatibility
-
-def active_pot_confirmation(pots):
-    while True:
-        print("\nPlease confirm the Pot you are currently using to withdraw funds")
-        active_pot = input()
-        if active_pot == "None":
-            active_pot = None
-            print(f"\nThanks, {active_pot} has been confirmed as your active pot")
-            return active_pot
-        pot_names = []
-        for pot in pots.values():
-            pot_names.append(pot.pot_name)
-        if active_pot in pot_names:
-            break
-        else:
-            print("\nPot name not found")
-
-    print(f"\nThanks, {active_pot} has been confirmed as your active pot")
-    return active_pot
     
 def pot_dict(pots):
     pot_dict = {}
     for pot in pots.values():
         pot_dict[f"{pot.pot_id}"] = pot.pot_name
     return pot_dict
-
-
-
-
-
-    

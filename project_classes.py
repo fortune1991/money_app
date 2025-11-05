@@ -1,5 +1,7 @@
-from datetime import datetime
+from __future__ import annotations
+import datetime
 import json
+import pandas as pd
 import requests
 import os
 
@@ -73,17 +75,40 @@ class Pot:
         """
 
         # Validations
-        if not isinstance(pot_id, int):
-            raise ValueError("Pot ID must be an integer value!")
-        
-        if not isinstance(vault, Vault): 
-            raise ValueError("vault must be an instance of the Vault class!")
-        
-        if not isinstance(start_date, datetime):
-            raise ValueError("start_date must be a valid date object!")
-        
-        if not isinstance(end_date, datetime):
-            raise ValueError("end_date must be a valid date object!")
+        try:
+            if not isinstance(pot_id, int):
+                raise ValueError(f"pot_id must be int, got {type(pot_id)} (value={pot_id})")
+        except (TypeError, ValueError) as e:
+            print(f"[VALIDATION ERROR] pot_id check failed -> {e}")
+            raise
+
+        try:
+            if not isinstance(vault, Vault):
+                raise ValueError(f"vault must be Vault, got {type(vault)} (value={vault})")
+        except (TypeError, ValueError) as e:
+            print(f"[VALIDATION ERROR] vault check failed -> {e}")
+            raise
+
+        try:
+            if not isinstance(start_date, datetime.date):
+                raise ValueError(f"start_date must be datetime.date, got {type(start_date)} (value={start_date})")
+        except (TypeError, ValueError) as e:
+            print(f"[VALIDATION ERROR] start_date check failed -> {e}")
+            raise
+
+        try:
+            if not isinstance(end_date, datetime.date):
+                raise ValueError(f"end_date must be datetime.date, got {type(end_date)} (value={end_date})")
+        except (TypeError, ValueError) as e:
+            print(f"[VALIDATION ERROR] end_date check failed -> {e}")
+            raise
+
+        try:
+            if not isinstance(user, User):
+                raise ValueError(f"user must be User, got {type(user)} (value={user})")
+        except (TypeError, ValueError) as e:
+            print(f"[VALIDATION ERROR] user check failed -> {e}")
+            raise
         
          # Assign unique Pot attributes
         self.pot_id = pot_id
@@ -102,9 +127,6 @@ class Pot:
             raise ValueError("End date must be after start date")
         self.daily_expenditure = amount / self.date_delta
         
-        # Add this Pot to the Vault's list of pots
-        vault.add_pot(self)
-
     def add_transaction(self, transaction):
         """
         Add a transaction instance to the pots list of transactions.
@@ -115,13 +137,28 @@ class Pot:
         self.transactions.append(transaction)
     
     def pot_value(self):
-        """Returns current value (base amount + transactions to date)"""
+        """Return current value (base amount + valid transactions to date)."""
         total = self.amount
-        today = datetime.today()
+        today = datetime.date.today()
+        
+        for transaction in self.transactions:
+            # Ensure correct type comparison
+            tx_date = transaction.date.date() if isinstance(transaction.date, datetime.datetime) else transaction.date
+            if tx_date <= today:
+                if transaction.amount < 0: #ADDED THIS. BE SURE THIS IS CORRECT. DO I NEED TO TAKE INTO ACCOUNT ADDITIONS ASWELL?
+                    total += transaction.amount
+
+        return total
+    
+    def pot_spend(self):
+        """Returns sum of transactions to date)"""
+        sum = 0
+        today = datetime.date.today()
         for transaction in self.transactions:
             if transaction.date <= today:
-                total += transaction.amount
-        return total
+                if transaction.amount < 0:
+                    sum += transaction.amount
+        return abs(sum)
             
 class Transaction:
     def __init__(self, transaction_id, transaction_name, date, pot, vault, user, manual_transaction, type="out", amount=0.00):
@@ -137,9 +174,6 @@ class Transaction:
         # Validations
         if not isinstance(transaction_id, int):
             raise ValueError("Transaction ID must be an integer value!")
-
-        if not isinstance(date, datetime):
-            raise ValueError("Must be a valid date object!")
         
         if not isinstance(pot, Pot): 
             raise ValueError("pot must be an instance of the Pot class!")
@@ -150,10 +184,17 @@ class Transaction:
         if manual_transaction not in [1,0]:
             raise ValueError("manual_Transaction must be == 1 (true) or 0 (false)")
         
+        # Normalize all date-like inputs
+        if isinstance(date, datetime.datetime):
+            self.date = date.date()
+        elif isinstance(date, datetime.date):
+            self.date = date
+        else:
+            raise ValueError(f"Must be a valid date object, got {type(date)}")
+        
          # Assign unique Pot attributes
         self.transaction_id = transaction_id
         self.transaction_name = transaction_name
-        self.date = date
         self.pot = pot  
         self.pot_id = pot.pot_id 
         self.vault = vault  
@@ -168,7 +209,7 @@ class Transaction:
         pot.add_transaction(self)
 
 class Balances:
-    def __init__(self, username, bank_currency, cash_currency, bank_balance=0.00, cash_balance=0.00):
+    def __init__(self, balance_id, username, date, bank_currency, cash_currency, bank_balance=0.00, cash_balance=0.00, active_pot=None):
         """
         Initialize a Balances object.
 
@@ -178,6 +219,9 @@ class Balances:
         :param cash_balance: Users cash balance as a decimel number
         """
 
+        # Convert string or other date types to datetime
+        date = self.convert_date_balances(date)
+        
         # Validations
         if bank_currency not in ["USD", "EUR", "GBP", "JPY", "AUD", "NZD", "CAD", "CHF", "THB", "SGD", "HKD", "CNY", "KRW", "INR", "IDR", "MYR", "PHP", "VND", "ZAR", "AED", "MXN", "TRY", "SEK", "NOK", "DKK"]:
             raise ValueError('Currency types supported are: ["USD", "EUR", "GBP", "JPY", "AUD", "NZD", "CAD", "CHF", "THB", "SGD", "HKD", "CNY", "KRW", "INR", "IDR", "MYR", "PHP", "VND", "ZAR", "AED", "MXN", "TRY", "SEK", "NOK", "DKK"]')
@@ -190,13 +234,51 @@ class Balances:
         
         if not isinstance(cash_balance, float):
             raise ValueError("Cash Balance must be a decimel number!")
+        
+        # Normalize all date-like inputs
+        if isinstance(date, datetime.datetime):
+            self.date = date.date()
+        elif isinstance(date, datetime.date):
+            self.date = date
+        else:
+            raise ValueError(f"Must be a valid date object, got {type(date)}")
                 
          # Assign unique Pot attributes
+        self.balance_id = balance_id
         self.username = username
+        self.date = date
         self.bank_currency = bank_currency
         self.cash_currency = cash_currency
         self.bank_balance = bank_balance
         self.cash_balance = cash_balance
+        self.active_pot = active_pot
+
+    @staticmethod
+    def convert_date_balances(date_input):
+        """
+        Convert a string in '2025-11-03 08:07:03.859' or a datetime-like object
+        to a datetime.datetime object.
+        """
+        # If already a datetime.datetime, return as-is
+        if isinstance(date_input, datetime.datetime):
+            return date_input
+
+        # If pandas Timestamp, convert to datetime
+        if isinstance(date_input, pd.Timestamp):
+            return date_input.to_pydatetime()
+
+        # If string, try parsing
+        if isinstance(date_input, str):
+            # Try datetime with microseconds
+            for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+                try:
+                    return datetime.datetime.strptime(date_input, fmt)
+                except ValueError:
+                    continue
+            raise ValueError(f"String '{date_input}' is not in a recognized datetime format.")
+        
+        # Anything else is invalid
+        raise TypeError(f"Invalid type for convert_date_balances: {type(date_input)}. Expected str, datetime, or pd.Timestamp.")
 
     def update_bank_currency(self, currency):
         """Function to update User's home bank currency"""
@@ -230,6 +312,16 @@ class Balances:
             raise ValueError("Balance must be an integer.")
         return "User's cash balance updated"
     
+    def update_date(self, date) -> str:
+        """Updates an existing balance's date of change"""
+        date = Balances.convert_date_balances(date)
+
+        if not isinstance(date, datetime.datetime):
+            raise ValueError(f"Must use a datetime object, got {type(date)}")
+
+        self.date = date
+        return "date updated"
+    
     def combined_balance(self, balance) -> int:
         """Calculates a User's combined balance
            in their banking currency"""
@@ -246,7 +338,15 @@ class Balances:
         combined_balance =  balance.bank_balance + cash_balance_home_currency
         
         return combined_balance
-
+    
+    def update_active_pot(self, balance, pot_names_list, active_pot) -> str:
+        """Update's the user's active pot"""
         
+        if active_pot in pot_names_list:
+            balance.active_pot = active_pot
+        else:
+            balance.active_pot = None
         
-        
+        return "User's active pot updated"
+    
+    

@@ -2,12 +2,30 @@ import datetime,os,sqlite3,math
 import pandas as pd
 import streamlit as st
 
-from database import create_database
 from project_classes import User,Vault,Pot,Transaction,Balances
-from project_functions import submit_transaction,convert_date,summary,create_pot,create_user,create_vault,create_profile,instructions,re_user,re_vaults,re_pots,re_transactions,re_balances,count_pots,count_transactions,count_vaults,transaction_summary,del_profile,del_vault,del_pot,del_transaction,user_exist,refresh_user_data,refresh_pot_vault_values,create_balance,balance_update,balance_summary,check_balances,auto_transaction,previous_balances_variable,active_pot_confirmation,pot_forecast,pot_dict,update_pot
+from project_functions import submit_transaction,convert_date,summary,create_pot,create_user,create_vault,create_profile,re_user,re_vaults,re_pots,re_transactions,re_balances,count_pots,count_transactions,count_vaults,transaction_summary,del_profile,del_vault,del_pot,del_transaction,user_exist,refresh_user_data,refresh_pot_vault_values,balance_update,auto_transaction,previous_balances_variable,pot_forecast,pot_dict,update_pot
 from streamlit_option_menu import option_menu
 from tabulate import tabulate
 from time import sleep
+
+# Initiate back-end
+vaults = {}
+pots = {}
+transactions = {}
+currency_list = ("USD", "EUR", "GBP", "JPY", "AUD", "NZD", "CAD", "CHF", "THB", "SGD", "HKD", "CNY", "KRW", "INR", "IDR", "MYR", "PHP", "VND", "ZAR", "AED", "MXN", "TRY", "SEK", "NOK", "DKK")
+
+db_path = "/Users/michaelfortune/Developer/projects/money/money_app/money.db"
+database_exists = os.path.isfile(db_path)
+
+# Establish a connection to the Database
+con = sqlite3.connect(db_path)
+cur = con.cursor()
+login = "Mike"
+user_exists = user_exist(con,login)
+
+# Create user and username variables
+user = re_user(con,login)
+username = login
 
 st.markdown(
     """
@@ -70,67 +88,103 @@ selected = option_menu(
     }
 )
 
-vaults = {}
-pots = {}
-transactions = {}
-currency_list = ("USD", "EUR", "GBP", "JPY", "AUD", "NZD", "CAD", "CHF", "THB", "SGD", "HKD", "CNY", "KRW", "INR", "IDR", "MYR", "PHP", "VND", "ZAR", "AED", "MXN", "TRY", "SEK", "NOK", "DKK")
+# Tab-change refresh
+if "prev_selected" not in st.session_state:
+    st.session_state.prev_selected = selected
+else:
+    if st.session_state.prev_selected != selected:
+        # User switched tabs
+        st.session_state.prev_selected = selected
 
-db_path = "/Users/michaelfortune/Developer/projects/money/money_app/money.db"
-database_exists = os.path.isfile(db_path)
+        # Clear cached table so Budgets refreshes immediately
+        if "budget_data" in st.session_state:
+            del st.session_state["budget_data"]
 
-# Establish a connection to the Database
-con = sqlite3.connect(db_path)
-cur = con.cursor()
-login = "Mike"
-user_exists = user_exist(con,login)
+        # Force a fresh reload when switching to Budgets
+        if selected == "Budgets":
+            with st.spinner("Refreshing data..."):
+                vaults, vault_ids, pots, pot_ids, transactions, transaction_ids, balances, previous_balances = refresh_user_data(
+                    con, user, username
+                )
+                pots, vaults = refresh_pot_vault_values(pots, vaults)
 
-# Create user and username variables
-user = re_user(con,login)
-username = login
 # Refresh user data
-vaults, vault_ids,pots,pot_ids,transactions,transaction_ids,balances = refresh_user_data(con,user,username)
-# Create previous balances object
-previous_balances = previous_balances_variable(balances)
+vaults, vault_ids,pots,pot_ids,transactions,transaction_ids,balances,previous_balances = refresh_user_data(con,user,username)
 # Update Pots and Vaults values, using class methods
 pots,vaults = refresh_pot_vault_values(pots,vaults)
+# Create pot names dictionary andf list
+pot_names_dict = pot_dict(pots)
+pot_names_list = list(pot_names_dict.values())
+pot_names_list.insert(0,None)
+active_pot = balances.active_pot
 # Display content based on the selected option
 if selected == "Dashboard":
     col1, col2, col3, col4, col5 = st.columns(5)
     with col1:
-        #active_pot
-        active_pot = st.text_input("Pot currently in use:", "Thailand")
+        # Try to set default index for selectbox
+        try:
+            default_index = pot_names_list.index(active_pot)
+        except (ValueError, NameError):
+            default_index = 0  # fallback if not found or undefined
+
+        active_pot = st.selectbox(
+            "Select active pot:",
+            pot_names_list,
+            index=default_index if pot_names_list else None
+        )
+        balances.update_active_pot(balances, pot_names_list, active_pot)
+        # Submit Balances to DB
+        balance_update(con,balances,balances.bank_balance,balances.cash_balance,pot_names_list,active_pot)
 
     with col2:
         #bank_balance
-        active_pot_2 = st.text_input("Current bank balance:", f"{balances.bank_balance}")
+        db_bank_balance = balances.bank_balance
+        bank_balance = st.text_input("Current bank balance:", f"{db_bank_balance}")
+        balances.update_bank_balance(bank_balance)
 
     with col3:
         #bank_currency
-        bank_currency = balances.bank_currency 
-        active_pot_3 = st.selectbox(
+        db_bank_currency = balances.bank_currency 
+        bank_currency = st.selectbox(
             "Bank currency:",
             currency_list,
-            index=currency_list.index(bank_currency)
+            index=currency_list.index(db_bank_currency)
         )
+        balances.update_bank_currency(bank_currency)
 
     with col4:
         #cash_balance
-        active_pot_4 = st.text_input("Current cash balance:", f"{balances.cash_balance}")
+        db_cash_balance = balances.cash_balance
+        cash_balance = st.text_input("Current cash balance:", f"{db_cash_balance}")
+        balances.update_cash_balance(cash_balance)
+
 
     with col5:
         #cash_currency
-        cash_currency = balances.cash_currency
-        active_pot_5 = st.selectbox(
+        db_cash_currency = balances.cash_currency
+        cash_currency = st.selectbox(
             "Cash currency:",
             currency_list,
-            index=currency_list.index(cash_currency),
+            index=currency_list.index(db_cash_currency),
         )
+        balances.update_cash_currency(cash_currency)
+
+    # SUBMIT THESE COLUMNS TO THE DATABASE
+    if float(db_bank_balance) != float(bank_balance) or str(db_bank_currency) != str(bank_currency) or float(db_cash_balance) != float(cash_balance) or str(db_cash_currency) != str(cash_currency):
+        balance_update(con,balances,bank_balance,cash_balance,pot_names_list,active_pot)
+        msg = st.empty()
+        msg.success("Balance updates submitted")
+        sleep(2)
+        msg.empty()
+        st.rerun()
 
     # Create auto_transaction
     transaction_count = count_transactions(con)
     auto_transaction_variable = auto_transaction(con,transaction_count,pots,vaults,user,username,balances,previous_balances,active_pot)
     if auto_transaction_variable != None:
         transactions[f"transaction_{(transaction_count + 1)}"] = auto_transaction_variable
+    # Refresh user data and pot/vault values
+    vaults, vault_ids,pots,pot_ids,transactions,transaction_ids,balances,previous_balances = refresh_user_data(con,user,username)
     pots,vaults = refresh_pot_vault_values(pots,vaults)
     
     # Plot
@@ -138,12 +192,10 @@ if selected == "Dashboard":
     st.pyplot(fig)
 
 elif selected == "Budgets":
+    # Refresh user data
+    vaults, vault_ids, pots, pot_ids, transactions, transaction_ids, balances, previous_balances = refresh_user_data(con, user, username)
     # Update Pots and Vaults values, using class methods
     pots, vaults = refresh_pot_vault_values(pots, vaults)
-
-    # Plot summary chart
-    fig = summary(vaults, pots)
-    st.pyplot(fig)
 
     # Generate base DataFrame depending on whether pots exist
     if len(pots) == 0:
@@ -173,12 +225,17 @@ elif selected == "Budgets":
                 },
             ]
         )
+
+        # Convert dates to date objects
+        df["Start Date"] = pd.to_datetime(df["Start Date"], errors="coerce")
+        df["End Date"] = pd.to_datetime(df["End Date"], errors="coerce")
+    
     else:
         df_list_of_dicts = []
         for pot in pots.values():
             df_list_of_dicts.append(
                 {
-                    "Spend Type": "Miscellaneous",  # Map to vaults
+                    "Spend Type": pot.vault.vault_name,
                     "Pot_ID": pot.pot_id,
                     "Pot Name": pot.pot_name,
                     "Pot Budget": pot.amount,
@@ -204,7 +261,7 @@ elif selected == "Budgets":
         "Click **'Calculate Automatic Values'** to update."
     )
 
-    # Create session
+    # Create or refresh the session data
     if "budget_data" not in st.session_state:
         st.session_state.budget_data = df.copy()
 
@@ -220,7 +277,7 @@ elif selected == "Budgets":
                 options=["Daily expenses", "Miscellaneous"],
                 default="Daily expenses",
             ),
-            "Pot_ID": st.column_config.NumberColumn("Pot_ID")
+            "Pot_ID": st.column_config.NumberColumn("Pot_ID"),
             "Pot Name": st.column_config.TextColumn("Pot Name"),
             "Pot Budget": st.column_config.NumberColumn("Pot Budget"),
             "Pot Balance": st.column_config.NumberColumn("Pot Balance"),
@@ -233,19 +290,31 @@ elif selected == "Budgets":
 
     # Calculate Button
     if st.button("Calculate Automatic Values", key="calc_btn"):
-        df_calc = edited_df.copy() 
-
+        df_calc = edited_df.copy()
         df_calc["Number of Days"] = (
             pd.to_datetime(df_calc["End Date"], errors="coerce")
             - pd.to_datetime(df_calc["Start Date"], errors="coerce")
         ).dt.days
 
+        # Start by checking the database
+        next_id = count_pots(con)
+        highest_id = next_id
+
+        # Now check the DataFrame
+        for _, row in df_calc.iterrows():
+            pot_id = row["Pot_ID"]
+            if pd.notna(pot_id) and int(pot_id) > highest_id:
+                highest_id = int(pot_id)
+
+        # Next available ID
+        next_id = highest_id + 1
+
         for i, row in df_calc.iterrows():
+            pot_id = row["Pot_ID"]
             delta = row["Number of Days"]
             if pd.notna(delta) and delta > 0:
                 pot_budget = row["Pot Budget"]
                 daily_allowance = row["Daily Allowance"]
-
                 if pd.notna(pot_budget) and pd.isna(daily_allowance):
                     df_calc.at[i, "Daily Allowance"] = round(pot_budget / delta, 2)
                 elif pd.isna(pot_budget) and pd.notna(daily_allowance):
@@ -253,8 +322,17 @@ elif selected == "Budgets":
                 elif pd.notna(pot_budget) and pd.notna(daily_allowance):
                     df_calc.at[i, "Daily Allowance"] = round(pot_budget / delta, 2)
 
+            if pd.isna(df_calc.at[i, "Pot_ID"]):
+                df_calc.at[i, "Pot_ID"] = next_id
+                next_id += 1
+
+            if pd.isna(df_calc.at[i, "Pot Balance"]): # IS THIS NEEDED?
+                if pot_id != None:
+                    df_calc.at[i, "Pot_Balance"] = pots[pot_id].pot_value()
+                
         # Save
         st.session_state.budget_data = df_calc
+        edited_df = df_calc.copy() # IS THIS NEEDED?
 
         # Display success message
         msg = st.empty()
@@ -264,10 +342,37 @@ elif selected == "Budgets":
         st.rerun()
 
     # Submit Button
-    if st.button("Submit Updates", key="submit_btn"):    
+    if st.button("Submit Updates", key="submit_btn"):
+        if balances.bank_balance == 0 and balances.cash_balance == 0:
+            st.error("Must update bank and cash balances before creating new pots")
+            st.stop()
+
+        # Remove empty rows and save
+        expected_cols = [
+            "Spend Type",
+            "Pot Name",
+            "Pot Budget",
+            "Start Date",
+            "End Date",
+            "Number of Days",
+            "Daily Allowance",
+        ]
+        final_df = edited_df.dropna(subset=expected_cols, how="any").reset_index(drop=True)
+
+        # Calculate if pots budgets exceed balances
+        total_spend = 0
+        for pot in pots.values():
+            total_spend += pot.pot_spend()
+        total_balance = balances.combined_balance(balances)
+        total_pot_budget = final_df["Pot Budget"].sum()
+        total_spend_plus_balance = total_balance + total_spend
+        if total_pot_budget > total_spend_plus_balance:
+            st.error("Budget estimate created exceeds your bank balance and previous spending! Add more money to your balances or reduce your budget estimates")
+            st.stop()
+
         # Save
-        final_df = edited_df.dropna(how="all").reset_index(drop=True)
         st.session_state.budget_data = final_df.copy()
+        edited_df = final_df.copy()
 
         # Display success message
         msg = st.empty()
@@ -275,16 +380,16 @@ elif selected == "Budgets":
         sleep(2)
         msg.empty()
 
-        # Add DB submission logic here
+        # Submit to Database
         # Compare dataframes. Add deleted pots to a set and use to delete from db
         deleted_pot_ids = set(df["Pot_ID"]) - set(edited_df["Pot_ID"])
-        for pot in deleted_pot_ids:
-            del_pot(con,user,pots,username,pot)
-        
+        for pot_id in deleted_pot_ids:
+            del_pot(con, user, pots, username, pot_names_dict, pot_id)
+
         # Compare dataframes. Add new pots to a set and use to submit to the db
         new_pot_ids = set(edited_df["Pot_ID"]) - set(df["Pot_ID"])
         for pot in new_pot_ids:
-            # Create new pot object and insert into database
+            # Create new variables for pot object
             pot_count = count_pots(con)
             spend_type = edited_df.loc[edited_df["Pot_ID"] == pot, "Spend Type"].iloc[0]
             pot_name = edited_df.loc[edited_df["Pot_ID"] == pot, "Pot Name"].iloc[0]
@@ -292,22 +397,69 @@ elif selected == "Budgets":
             start_date = edited_df.loc[edited_df["Pot_ID"] == pot, "Start Date"].iloc[0]
             end_date = edited_df.loc[edited_df["Pot_ID"] == pot, "End Date"].iloc[0]
 
-            pots[f"pot_{(pot_count + 1)}"] = create_pot(con,x,vaults,user,username,spend_type,pot_name,pot_budget,start_date,end_date)
+            if spend_type != None:
+                # Convert date objects
+                start_date = convert_date(start_date)
+                end_date = convert_date(end_date)
+
+                # Create Pot object
+                pots[f"pot_{(pot_count + 1)}"] = create_pot(
+                    con,
+                    pot_count,
+                    vaults,
+                    user,
+                    username,
+                    spend_type,
+                    pot_name,
+                    pot_budget,
+                    start_date,
+                    end_date,
+                )
 
         # Iterate through edited df and UPDATE each row in the database
+        edited_df.columns = edited_df.columns.str.replace(" ", "_")
         for row in edited_df.itertuples(index=False):
-            x = count_pots(con)
-            spend_type = row._asdict().get("Spend Type")
+            #x = count_pots(con)
+            spend_type = row._asdict().get("Spend_Type")
             pot_id = row._asdict().get("Pot_ID")
-            pot_name = row._asdict().get("Pot Name")
-            pot_budget = row._asdict().get("Pot Budget")
-            start_date = row._asdict().get("Start Date")
-            end_date = row._asdict().get("End Date")
+            pot_name = row._asdict().get("Pot_Name")
+            pot_budget = row._asdict().get("Pot_Budget")
+            start_date = row._asdict().get("Start_Date")
+            end_date = row._asdict().get("End_Date")
 
-            update_pot(con,x,vaults,user,username,spend_type,pot_id,pot_name,pot_budget,start_date,end_date)
+            if spend_type != None:
+                # Convert date objects
+                start_date = convert_date(start_date)
+                end_date = convert_date(end_date)
 
+                # Update Pot object
+                update_pot(
+                    con,
+                    pot_id,
+                    vaults,
+                    user,
+                    username,
+                    spend_type,
+                    pot_id,
+                    pot_name,
+                    pot_budget,
+                    start_date,
+                    end_date,
+                )
+
+        # Recalculate pots and vaults from updated database - IS THIS NEEDED?
+        vaults, vault_ids, pots, pot_ids, transactions, transaction_ids, balances, previous_balances = refresh_user_data(con, user, username)
+        pots, vaults = refresh_pot_vault_values(pots, vaults)
+        
+        # Clear cached table data to ensure pot balances refresh
+        if "budget_data" in st.session_state:
+            del st.session_state["budget_data"]
         st.rerun()
-    
+
+    # Plot summary chart
+    fig = summary(vaults, pots)
+    st.pyplot(fig)
+
 elif selected == "Transactions":
     # Base data
     if len(transactions) == 0:
@@ -324,7 +476,6 @@ elif selected == "Transactions":
     
     else:
         df_list_of_dicts = []
-        pot_names_dict = pot_dict(pots)
         for transaction in transactions.values():
             if transaction.manual_transaction == 0:
                 continue
