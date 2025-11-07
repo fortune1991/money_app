@@ -14,14 +14,88 @@ from time import sleep
 import warnings
 warnings.filterwarnings("ignore",message="The default datetime adapter is deprecated",category=DeprecationWarning)
     
-def auto_transaction(con, x, pots, vaults, user, username, balances, previous_balances, active_pot):
+def balance_transaction(con, transaction_id, pots, vaults, balances, previous_balances, user, username, balance_transaction_name, pot_name, date, amount, transaction_type):
     """
     Automatically creates a transaction for the active pot based on changes in balances.
     Prevents over-correction of pot balances and updates the pot's transactions in memory.
 
     Parameters:
         con: SQLite connection
-        x: last transaction ID (used for incrementing)
+        pots: dict of Pot objects
+        vaults: dict of Vault objects
+        user: User object
+        username: str
+        balances: current Balances object
+        previous_balances: previous Balances object
+        active_pot: str (name of the pot to adjust)
+    Returns:
+        Transaction object if created, else None
+    """
+    
+    manual_transaction = 1
+    balance_transaction = 1
+
+    # Find the pot and vault
+    selected_pot = next((p for p in pots.values() if p.pot_name == pot_name and p.username == username), None)
+    if not selected_pot:
+        print(f"Pot '{pot_name}' not found.")
+        return None
+
+    selected_vault = vaults.get(f"vault_{selected_pot.vault_id}")
+    if not selected_vault:
+        print(f"Vault for pot '{selected_pot}' not found.")
+        return None
+
+    # Create Transaction object
+    transaction = Transaction(
+        transaction_id=transaction_id,
+        transaction_name=balance_transaction_name,
+        date=date,
+        pot=selected_pot,
+        vault=selected_vault,
+        manual_transaction=manual_transaction,
+        balance_transaction=balance_transaction,
+        type=transaction_type,
+        amount=amount,
+        user=user
+    )
+
+    # Add transaction to pot in memory
+    selected_pot.add_transaction(transaction)
+
+    # Insert transaction into DB
+    cur = con.cursor()
+    cur.execute(
+        "INSERT INTO transactions VALUES(?,?,?,?,?,?,?,?,?,?)",
+        (
+            transaction_id,
+            balance_transaction_name,
+            date,
+            selected_pot.pot_id,
+            selected_vault.vault_id,
+            manual_transaction,
+            balance_transaction,
+            transaction_type,
+            amount,
+            username
+        )
+    )
+    con.commit()
+    cur.close()
+
+    # Update previous balances so next call won't repeat the same adjustment
+    previous_balances.bank_balance = balances.bank_balance
+    previous_balances.cash_balance = balances.cash_balance
+
+    return transaction
+
+def auto_transaction(con, pots, vaults, user, username, balances, previous_balances, active_pot):
+    """
+    Automatically creates a transaction for the active pot based on changes in balances.
+    Prevents over-correction of pot balances and updates the pot's transactions in memory.
+
+    Parameters:
+        con: SQLite connection
         pots: dict of Pot objects
         vaults: dict of Vault objects
         user: User object
@@ -44,6 +118,7 @@ def auto_transaction(con, x, pots, vaults, user, username, balances, previous_ba
     amount = delta  # signed: +ve for in, -ve for out
     date = datetime.datetime.now()
     manual_transaction = 0
+    balance_transaction = 0
 
     # Find the pot and vault
     selected_pot = next((p for p in pots.values() if p.pot_name == active_pot and p.username == username), None)
@@ -82,6 +157,7 @@ def auto_transaction(con, x, pots, vaults, user, username, balances, previous_ba
         pot=selected_pot,
         vault=selected_vault,
         manual_transaction=manual_transaction,
+        balance_transaction=balance_transaction,
         type=transaction_type,
         amount=amount,
         user=user
@@ -92,7 +168,7 @@ def auto_transaction(con, x, pots, vaults, user, username, balances, previous_ba
 
     # Insert transaction into DB
     cur.execute(
-        "INSERT INTO transactions VALUES(?,?,?,?,?,?,?,?,?)",
+        "INSERT INTO transactions VALUES(?,?,?,?,?,?,?,?,?,?)",
         (
             start_transaction,
             transaction_name,
@@ -100,6 +176,7 @@ def auto_transaction(con, x, pots, vaults, user, username, balances, previous_ba
             selected_pot.pot_id,
             selected_vault.vault_id,
             manual_transaction,
+            balance_transaction,
             transaction_type,
             amount,
             username
@@ -114,12 +191,17 @@ def auto_transaction(con, x, pots, vaults, user, username, balances, previous_ba
 
     return transaction
 
-def submit_transaction(con,x,pots,vaults,user,username,transaction_name,pot_name,date,amount,transaction_type):
+def submit_transaction(con,transaction_id,pots,vaults,user,username,transaction_name,pot_name,date,amount,transaction_type):
+    
+    # Handle None or invalid transaction_id
+    try:
+        transaction_id = int(float(transaction_id))
+    except (TypeError, ValueError):
+        return None
+    
+    
     manual_transaction = 1
-    # Count existing transactions
-    start_transaction = x + 1
-    if start_transaction == None:
-        start_transaction = 1
+    balance_transaction = 0
     
     # Find the pot using a simple loop
     selected_pot = None
@@ -133,12 +215,12 @@ def submit_transaction(con,x,pots,vaults,user,username,transaction_name,pot_name
     if selected_pot:
         try:
             #Input all information into the Class
-            transaction = Transaction(transaction_id=start_transaction,transaction_name=transaction_name,date=date,pot=selected_pot,vault=selected_vault,manual_transaction=manual_transaction,type=transaction_type,amount=amount,user=user)
-            transaction_data = [(start_transaction,transaction_name,date,selected_pot.pot_id,selected_vault.vault_id,manual_transaction,transaction_type,amount,username)]
+            transaction = Transaction(transaction_id=transaction_id,transaction_name=transaction_name,date=date,pot=selected_pot,vault=selected_vault,manual_transaction=manual_transaction,balance_transaction=balance_transaction,type=transaction_type,amount=amount,user=user)
+            transaction_data = [(transaction_id,transaction_name,date,selected_pot.pot_id,selected_vault.vault_id,manual_transaction,balance_transaction,transaction_type,amount,username)]
             if transaction:
                 # Save transaction to database
                 cur = con.cursor()
-                cur.executemany("INSERT INTO transactions VALUES(?,?,?,?,?,?,?,?,?)",transaction_data)
+                cur.executemany("INSERT INTO transactions VALUES(?,?,?,?,?,?,?,?,?,?)",transaction_data)
                 con.commit()
                 cur.close()
             return transaction
@@ -150,6 +232,79 @@ def submit_transaction(con,x,pots,vaults,user,username,transaction_name,pot_name
             print(f"An unexpected error occurred: {e}")
     else:
         print(f"pot '{pot_input}' not found. Please enter a valid pot name.")
+
+def update_transaction(con, transaction_id, pots, vaults, user, username, transaction_name, pot_name, date, amount, transaction_type):
+    # Handle None or invalid transaction_id
+    try:
+        transaction_id = int(float(transaction_id))
+    except (TypeError, ValueError):
+        return None
+    
+    manual_transaction = 1
+    balance_transaction = 0
+
+    # Find the pot and its vault
+    selected_pot = None
+    selected_vault = None
+    for pot in pots.values():
+        if pot.pot_name == pot_name and pot.username == username: 
+            selected_pot = pot
+            selected_vault = vaults.get(f"vault_{pot.vault_id}")
+            break
+
+    if selected_pot:
+        try:
+            # Create updated transaction object
+            transaction = Transaction(
+                transaction_id=transaction_id,
+                transaction_name=transaction_name,
+                date=date,
+                pot=selected_pot,
+                vault=selected_vault,
+                manual_transaction=manual_transaction,
+                balance_transaction=balance_transaction,
+                type=transaction_type,
+                amount=amount,
+                user=user
+            )
+
+            if transaction:
+                # Update transaction in database
+                cur = con.cursor()
+                cur.execute("""
+                    UPDATE transactions
+                    SET transaction_name = ?,
+                        date = ?,
+                        pot_id = ?,
+                        vault_id = ?,
+                        manual_transaction = ?,
+                        balance_transaction = ?,
+                        type = ?,
+                        amount = ?,
+                        username = ?
+                    WHERE transaction_id = ?
+                """, (
+                    transaction_name,
+                    date,
+                    selected_pot.pot_id,
+                    selected_vault.vault_id,
+                    manual_transaction,
+                    balance_transaction,
+                    transaction_type,
+                    amount,
+                    username,
+                    transaction_id
+                ))
+                con.commit()
+                cur.close()
+            return transaction
+
+        except ValueError as e:
+            print(f"Error: {e}")
+        except Exception as e:
+            print(f"An unexpected error occurred: {e}")
+    else:
+        print(f"Pot '{pot_name}' not found. Please enter a valid pot name.")
 
 def convert_date(date_input):
     """
@@ -603,12 +758,13 @@ def re_transactions(con,pots,vaults,pot_ids,user):
                 transaction_name = transaction[1]
                 date = convert_date(transaction[2])
                 manual_transaction = (transaction[5])
-                type = (transaction[6])
-                amount = int(transaction[7])
+                balance_transaction = (transaction[6])
+                type = (transaction[7])
+                amount = int(transaction[8])
                 pot = pots[f"pot_{transaction[3]}"] # Dictionary key format is "Pot_1: Object"
                 vault = vaults[f"vault_{transaction[4]}"] # Dictionary key format is "Vault_1: Object"
                 # Create transaction instance
-                transaction = Transaction(transaction_id=transaction_id,transaction_name=transaction_name,date=date,pot=pot,vault=vault,manual_transaction=manual_transaction,type=type,amount=amount,user=user)
+                transaction = Transaction(transaction_id=transaction_id,transaction_name=transaction_name,date=date,pot=pot,vault=vault,manual_transaction=manual_transaction,balance_transaction=balance_transaction,type=type,amount=amount,user=user)
                 # Add instance to transactions object dictionary
                 transactions[f"transaction_{transaction.transaction_id}"] = transaction
                 # Append transaction_id to list
@@ -910,3 +1066,10 @@ def pot_dict(pots):
     for pot in pots.values():
         pot_dict[f"{pot.pot_id}"] = pot.pot_name
     return pot_dict
+
+def active_pot_dict(pots):
+    active_pot_dict = {}
+    for pot in pots.values():
+        if pot.vault.vault_name == "Daily expenses":
+            active_pot_dict[f"{pot.pot_id}"] = pot.pot_name
+    return active_pot_dict

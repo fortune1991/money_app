@@ -57,6 +57,7 @@ def create_database():
             pot_id INTEGER,
             vault_id INTEGER,
             manual_transaction INTEGER NOT NULL,
+            balance_transaction INTEGER NOT NULL,
             type TEXT NOT NULL,
             amount REAL NOT NULL,
             username TEXT NOT NULL,

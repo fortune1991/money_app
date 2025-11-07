@@ -145,8 +145,8 @@ class Pot:
             # Ensure correct type comparison
             tx_date = transaction.date.date() if isinstance(transaction.date, datetime.datetime) else transaction.date
             if tx_date <= today:
-                if transaction.amount < 0: #ADDED THIS. BE SURE THIS IS CORRECT. DO I NEED TO TAKE INTO ACCOUNT ADDITIONS ASWELL?
-                    total += transaction.amount
+                # if transaction.amount < 0: # Removed this. Check correctness
+                total += transaction.amount
 
         return total
     
@@ -155,13 +155,13 @@ class Pot:
         sum = 0
         today = datetime.date.today()
         for transaction in self.transactions:
-            if transaction.date <= today:
+            if transaction.date <= today and transaction.balance_transaction == 0:
                 if transaction.amount < 0:
                     sum += transaction.amount
         return abs(sum)
             
 class Transaction:
-    def __init__(self, transaction_id, transaction_name, date, pot, vault, user, manual_transaction, type="out", amount=0.00):
+    def __init__(self, transaction_id, transaction_name, date, pot, vault, user, manual_transaction, balance_transaction, type="out", amount=0.00):
         """
         Initialize a Transaction object.
 
@@ -182,7 +182,10 @@ class Transaction:
             raise ValueError('Transaction type must be either "in" or "out"!')
         
         if manual_transaction not in [1,0]:
-            raise ValueError("manual_Transaction must be == 1 (true) or 0 (false)")
+            raise ValueError("manual_transaction must be == 1 (true) or 0 (false)")
+        
+        if balance_transaction not in [1,0]:
+            raise ValueError("balance_transaction must be == 1 (true) or 0 (false)")
         
         # Normalize all date-like inputs
         if isinstance(date, datetime.datetime):
@@ -200,6 +203,7 @@ class Transaction:
         self.vault = vault  
         self.vault_id = vault.vault_id
         self.manual_transaction = manual_transaction 
+        self.balance_transaction = balance_transaction
         self.type = type
         self.amount = amount
         self.user = user 

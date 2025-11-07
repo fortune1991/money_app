@@ -3,7 +3,7 @@ import pandas as pd
 import streamlit as st
 
 from project_classes import User,Vault,Pot,Transaction,Balances
-from project_functions import submit_transaction,convert_date,summary,create_pot,create_user,create_vault,create_profile,re_user,re_vaults,re_pots,re_transactions,re_balances,count_pots,count_transactions,count_vaults,transaction_summary,del_profile,del_vault,del_pot,del_transaction,user_exist,refresh_user_data,refresh_pot_vault_values,balance_update,auto_transaction,previous_balances_variable,pot_forecast,pot_dict,update_pot
+from project_functions import submit_transaction,convert_date,summary,create_pot,create_user,create_vault,create_profile,re_user,re_vaults,re_pots,re_transactions,re_balances,count_pots,count_transactions,count_vaults,transaction_summary,del_profile,del_vault,del_pot,del_transaction,user_exist,refresh_user_data,refresh_pot_vault_values,balance_update,auto_transaction,previous_balances_variable,pot_forecast,pot_dict,update_pot,update_transaction,active_pot_dict,balance_transaction
 from streamlit_option_menu import option_menu
 from tabulate import tabulate
 from time import sleep
@@ -112,29 +112,35 @@ else:
 vaults, vault_ids,pots,pot_ids,transactions,transaction_ids,balances,previous_balances = refresh_user_data(con,user,username)
 # Update Pots and Vaults values, using class methods
 pots,vaults = refresh_pot_vault_values(pots,vaults)
-# Create pot names dictionary andf list
+# Create pot names dictionary and list
 pot_names_dict = pot_dict(pots)
 pot_names_list = list(pot_names_dict.values())
 pot_names_list.insert(0,None)
+# Create active pot names dictionary and list
+active_pot_names_dict = active_pot_dict(pots)
+active_pot_names_list = list(active_pot_names_dict.values())
+active_pot_names_list.insert(0,None)
 active_pot = balances.active_pot
+
+
 # Display content based on the selected option
 if selected == "Dashboard":
-    col1, col2, col3, col4, col5 = st.columns(5)
+    col1, col2, col3, col4, col5, col6 = st.columns([1, 1, 0.75, 1, 0.75, 1.5])
     with col1:
         # Try to set default index for selectbox
         try:
-            default_index = pot_names_list.index(active_pot)
+            default_index = active_pot_names_list.index(active_pot)
         except (ValueError, NameError):
             default_index = 0  # fallback if not found or undefined
 
         active_pot = st.selectbox(
             "Select active pot:",
-            pot_names_list,
+            active_pot_names_list,
             index=default_index if pot_names_list else None
         )
-        balances.update_active_pot(balances, pot_names_list, active_pot)
+        balances.update_active_pot(balances, active_pot_names_list, active_pot)
         # Submit Balances to DB
-        balance_update(con,balances,balances.bank_balance,balances.cash_balance,pot_names_list,active_pot)
+        balance_update(con,balances,balances.bank_balance,balances.cash_balance,active_pot_names_list,active_pot)
 
     with col2:
         #bank_balance
@@ -169,6 +175,14 @@ if selected == "Dashboard":
         )
         balances.update_cash_currency(cash_currency)
 
+    with col6:
+        graph_list = ["Pot Spending Forecast","Summary of Pot Balances"]
+        display_graph = st.selectbox(
+            "Display graph:",
+            graph_list,
+            index=0,
+        )
+
     # SUBMIT THESE COLUMNS TO THE DATABASE
     if float(db_bank_balance) != float(bank_balance) or str(db_bank_currency) != str(bank_currency) or float(db_cash_balance) != float(cash_balance) or str(db_cash_currency) != str(cash_currency):
         balance_update(con,balances,bank_balance,cash_balance,pot_names_list,active_pot)
@@ -180,16 +194,22 @@ if selected == "Dashboard":
 
     # Create auto_transaction
     transaction_count = count_transactions(con)
-    auto_transaction_variable = auto_transaction(con,transaction_count,pots,vaults,user,username,balances,previous_balances,active_pot)
+    auto_transaction_variable = auto_transaction(con,pots,vaults,user,username,balances,previous_balances,active_pot)
     if auto_transaction_variable != None:
         transactions[f"transaction_{(transaction_count + 1)}"] = auto_transaction_variable
     # Refresh user data and pot/vault values
     vaults, vault_ids,pots,pot_ids,transactions,transaction_ids,balances,previous_balances = refresh_user_data(con,user,username)
     pots,vaults = refresh_pot_vault_values(pots,vaults)
     
-    # Plot
-    fig = pot_forecast(pots,active_pot)
-    st.pyplot(fig)
+    if display_graph == "Pot Spending Forecast":
+        # Plot Forecast
+        fig = pot_forecast(pots,active_pot)
+        st.pyplot(fig)
+
+    else:
+        # Plot summary chart
+        fig = summary(vaults, pots)
+        st.pyplot(fig)
 
 elif selected == "Budgets":
     # Refresh user data
@@ -265,7 +285,7 @@ elif selected == "Budgets":
     if "budget_data" not in st.session_state:
         st.session_state.budget_data = df.copy()
 
-    # create editable table
+    # Create editable table
     edited_df = st.data_editor(
         st.session_state.budget_data,
         num_rows="dynamic",
@@ -279,7 +299,12 @@ elif selected == "Budgets":
             ),
             "Pot_ID": st.column_config.NumberColumn("Pot_ID"),
             "Pot Name": st.column_config.TextColumn("Pot Name"),
-            "Pot Budget": st.column_config.NumberColumn("Pot Budget"),
+            "Pot Budget": st.column_config.NumberColumn(
+                "Pot Budget",
+                min_value=0.0,  # prevents negative numbers
+                step=0.01,
+                help="Enter a positive amount only",
+            ),
             "Pot Balance": st.column_config.NumberColumn("Pot Balance"),
             "Start Date": st.column_config.DateColumn("Start Date", format="DD/MM/YY"),
             "End Date": st.column_config.DateColumn("End Date", format="DD/MM/YY"),
@@ -291,10 +316,39 @@ elif selected == "Budgets":
     # Calculate Button
     if st.button("Calculate Automatic Values", key="calc_btn"):
         df_calc = edited_df.copy()
-        df_calc["Number of Days"] = (
-            pd.to_datetime(df_calc["End Date"], errors="coerce")
-            - pd.to_datetime(df_calc["Start Date"], errors="coerce")
-        ).dt.days
+
+        # Error Checking
+        required_cols = ["Spend Type", "Pot Name", "Start Date", "End Date"]
+        missing_rows = df_calc[df_calc[required_cols].isnull().any(axis=1)]
+        if not missing_rows.empty:
+            msg = st.empty()
+            msg.error("All rows must have **Spend Type, Pot Name, Start Date, and End Date** filled before calculation.")
+            sleep(3)
+            msg.empty()
+            st.rerun()
+
+        # Convert to datetime and validate
+        df_calc["Start Date"] = pd.to_datetime(df_calc["Start Date"], errors="coerce")
+        df_calc["End Date"] = pd.to_datetime(df_calc["End Date"], errors="coerce")
+
+        if df_calc["Start Date"].isna().any() or df_calc["End Date"].isna().any():
+            msg = st.empty()
+            msg.error("Invalid or missing dates detected — please correct them before calculation.")
+            sleep(3)
+            msg.empty()
+            st.rerun()
+
+        # Ensure start date < end date
+        invalid_dates = df_calc[df_calc["End Date"] < df_calc["Start Date"]]
+        if not invalid_dates.empty:
+            msg = st.empty()
+            msg.error("Each **End Date** must be after its **Start Date**")
+            sleep(3)
+            msg.empty()
+            st.rerun()
+
+        # Now calculate number of days
+        df_calc["Number of Days"] = (df_calc["End Date"] - df_calc["Start Date"]).dt.days
 
         # Start by checking the database
         next_id = count_pots(con)
@@ -307,7 +361,7 @@ elif selected == "Budgets":
                 highest_id = int(pot_id)
 
         # Next available ID
-        next_id = highest_id + 1
+        next_id = int(highest_id) + 1
 
         for i, row in df_calc.iterrows():
             pot_id = row["Pot_ID"]
@@ -315,6 +369,7 @@ elif selected == "Budgets":
             if pd.notna(delta) and delta > 0:
                 pot_budget = row["Pot Budget"]
                 daily_allowance = row["Daily Allowance"]
+
                 if pd.notna(pot_budget) and pd.isna(daily_allowance):
                     df_calc.at[i, "Daily Allowance"] = round(pot_budget / delta, 2)
                 elif pd.isna(pot_budget) and pd.notna(daily_allowance):
@@ -323,16 +378,12 @@ elif selected == "Budgets":
                     df_calc.at[i, "Daily Allowance"] = round(pot_budget / delta, 2)
 
             if pd.isna(df_calc.at[i, "Pot_ID"]):
-                df_calc.at[i, "Pot_ID"] = next_id
+                df_calc.at[i, "Pot_ID"] = int(next_id)
                 next_id += 1
 
-            if pd.isna(df_calc.at[i, "Pot Balance"]): # IS THIS NEEDED?
-                if pot_id != None:
-                    df_calc.at[i, "Pot_Balance"] = pots[pot_id].pot_value()
-                
         # Save
         st.session_state.budget_data = df_calc
-        edited_df = df_calc.copy() # IS THIS NEEDED?
+        edited_df = df_calc.copy()  # optional but safe
 
         # Display success message
         msg = st.empty()
@@ -347,7 +398,7 @@ elif selected == "Budgets":
             st.error("Must update bank and cash balances before creating new pots")
             st.stop()
 
-        # Remove empty rows and save
+        # Remove empty rows, check expected cols and save
         expected_cols = [
             "Spend Type",
             "Pot Name",
@@ -357,6 +408,14 @@ elif selected == "Budgets":
             "Number of Days",
             "Daily Allowance",
         ]
+        missing_rows = edited_df[edited_df[expected_cols].isnull().any(axis=1)]
+        if not missing_rows.empty:
+            msg = st.empty()
+            msg.error('All rows must have **Spend Type, Pot Name, Pot Budget, Start Date, End Date, Number of Days and Daily Allowance** filled before submission. You may need to **Calcuate Automatic Values** first')
+            sleep(5)
+            msg.empty()
+            st.rerun()
+
         final_df = edited_df.dropna(subset=expected_cols, how="any").reset_index(drop=True)
 
         # Calculate if pots budgets exceed balances
@@ -419,7 +478,6 @@ elif selected == "Budgets":
         # Iterate through edited df and UPDATE each row in the database
         edited_df.columns = edited_df.columns.str.replace(" ", "_")
         for row in edited_df.itertuples(index=False):
-            #x = count_pots(con)
             spend_type = row._asdict().get("Spend_Type")
             pot_id = row._asdict().get("Pot_ID")
             pot_name = row._asdict().get("Pot_Name")
@@ -447,7 +505,7 @@ elif selected == "Budgets":
                     end_date,
                 )
 
-        # Recalculate pots and vaults from updated database - IS THIS NEEDED?
+        # Recalculate pots and vaults from updated database 
         vaults, vault_ids, pots, pot_ids, transactions, transaction_ids, balances, previous_balances = refresh_user_data(con, user, username)
         pots, vaults = refresh_pot_vault_values(pots, vaults)
         
@@ -456,114 +514,310 @@ elif selected == "Budgets":
             del st.session_state["budget_data"]
         st.rerun()
 
-    # Plot summary chart
-    fig = summary(vaults, pots)
-    st.pyplot(fig)
-
 elif selected == "Transactions":
+    # Refresh user data
+    vaults, vault_ids, pots, pot_ids, transactions, transaction_ids, balances, previous_balances = refresh_user_data(con, user, username)
+    pots, vaults = refresh_pot_vault_values(pots, vaults)
+
     # Base data
     if len(transactions) == 0:
-        df = pd.DataFrame(
+        transactions_df = pd.DataFrame(
             [
                 {
+                    "Transaction_ID": None,
                     "Transaction Name": None,
                     "Date": None,
                     "Pot Name": None,
                     "Amount": None,
-                },
+                }
             ]
         )
-    
+        transactions_df["Date"] = pd.to_datetime(transactions_df["Date"], errors="coerce")
+
     else:
-        df_list_of_dicts = []
+        transactions_df_list_of_dicts = []
         for transaction in transactions.values():
-            if transaction.manual_transaction == 0:
+            # Exclude auto-generated transactions
+            if transaction.manual_transaction == 0 or transaction.balance_transaction == 1:
                 continue
-            else:
-                dict = {
+
+            transaction_dict = {
+                "Transaction_ID": f"{transaction.transaction_id}",
                 "Transaction Name": f"{transaction.transaction_name}",
                 "Date": transaction.date.strftime("%d/%m/%y"),
-                "Pot Name": f"{pot_names_dict[f"{transaction.pot_id}"]}",
-                "Amount": transaction.amount,
-                }
+                "Pot Name": pot_names_dict.get(str(transaction.pot_id), ""),
+                "Amount": (transaction.amount * -1),
+            }
+            transactions_df_list_of_dicts.append(transaction_dict)
 
-                df_list_of_dicts.append(dict)
-        
-        
-        # Re-check as auto transactions aren't displayed
-        if len(df_list_of_dicts) == 0:
-            df = pd.DataFrame(
+        # Recheck for empty after filtering
+        if len(transactions_df_list_of_dicts) == 0:
+            transactions_df = pd.DataFrame(
                 [
                     {
+                        "Transaction_ID": None,
                         "Transaction Name": None,
                         "Date": None,
                         "Pot Name": None,
                         "Amount": None,
-                    },
+                    }
                 ]
             )
-        
+            transactions_df["Date"] = pd.to_datetime(transactions_df["Date"], format="%d/%m/%y", errors="coerce")
         else:
-            df = pd.DataFrame(df_list_of_dicts)
-            # Convert date strings
-            df["Date"] = pd.to_datetime(df["Date"], format="%d/%m/%y").dt.date
+            transactions_df = pd.DataFrame(transactions_df_list_of_dicts)
+            transactions_df["Date"] = pd.to_datetime(transactions_df["Date"], format="%d/%m/%y", errors="coerce")
 
-    # Track submission
+    # Session setup 
     if "transactions_submitted" not in st.session_state:
         st.session_state.transactions_submitted = False
 
+    # Editable section
     if not st.session_state.transactions_submitted:
-        st.info(
-            "Existing data is read-only. You can delete rows or add new transactions at the bottom."
-        )
+        st.info("Edit existing transactions, delete rows, or add new ones at the bottom.")
 
-        edited_df = st.data_editor(
-            df,
+        transactions_edited_df = st.data_editor(
+            transactions_df,
             num_rows="dynamic",
             key="transactions_editor",
             column_config={
+                "Transaction_ID": st.column_config.TextColumn("Transaction_ID", disabled=True),
                 "Transaction Name": st.column_config.TextColumn("Transaction Name"),
                 "Date": st.column_config.DateColumn("Date", format="DD/MM/YY"),
-                "Pot Name": st.column_config.TextColumn("Pot Name"),
-                "Amount": st.column_config.NumberColumn("Amount"),
+                "Pot Name": st.column_config.SelectboxColumn(
+                    "Pot Name",
+                    options=pot_names_list,
+                    help="Select the pot this transaction belongs to",
+                ),
+                "Amount": st.column_config.NumberColumn(
+                    "Amount",
+                    min_value=0.0,
+                    step=0.01,
+                    help="Enter a positive amount only",
+                ),
             },
         )
-        
+
+        # Submission
         if st.button("Submit"):
-            # Remove completely blank rows
-            final_df = edited_df.dropna(how="all").reset_index(drop=True)
-            # Display success message
+            # Remove empty rows and validate before saving
+            today= datetime.date.today()
+
+            # Convert the 'Date' column to dates (no time)
+            transaction_dates = pd.to_datetime(transactions_edited_df["Date"], errors="coerce").dt.date
+
+            if (transaction_dates > today).any():
+                msg = st.empty()
+                msg.error("Transaction dates cannot be in the future.")
+                sleep(3)
+                msg.empty()
+                st.rerun()
+
+            expected_cols = ["Transaction Name", "Date", "Pot Name", "Amount"]
+            missing_rows = transactions_edited_df[transactions_edited_df[expected_cols].isnull().any(axis=1)]
+            
+            if not missing_rows.empty:
+                msg = st.empty()
+                msg.error('All rows must have **Transaction Name, Date, Pot Name and Amount** filled before submission')
+                sleep(3)
+                msg.empty()
+                st.rerun()
+
+            transactions_final_df = transactions_edited_df.dropna(how="all").reset_index(drop=True)
+
+            # Success message
             msg = st.empty()
-            msg.success("Transaction submitted")
+            msg.success("Transactions updated successfully")
             sleep(2)
             msg.empty()
-            # Submit to database
-            pass
-            #st.rerun()
-            # Update flag
+
+            # Delete removed transactions
+            old_ids = set(transactions_df["Transaction_ID"].dropna().astype(int))
+            new_ids = set(transactions_edited_df["Transaction_ID"].dropna().astype(int))
+            deleted_transaction_ids = old_ids - new_ids
+            for transaction_id in deleted_transaction_ids:
+                del_transaction(con, user, transactions, username, transaction_id)
+
+                # Find and delete any linked balance transaction
+                for t in list(transactions.values()):  # list() copy to avoid mutation during iteration
+                    # Match by naming convention (Balance + original name)
+                    if t.transaction_name.startswith("Balance "):
+                        original_name = t.transaction_name.replace("Balance ", "")
+                        if transactions.get(f"transaction_{transaction_id}") and \
+                        transactions[f"transaction_{transaction_id}"].transaction_name == original_name:
+                            del_transaction(con, user, transactions, username, t.transaction_id)
+
+            # Add new transactions
+            existing_ids = {int(t.transaction_id) for t in transactions.values()}
+            next_available_id = max(existing_ids) + 1 if existing_ids else 1
+            transaction_type = "out"
+
+            new_rows = transactions_edited_df[
+                transactions_edited_df["Transaction_ID"].isnull() | (transactions_edited_df["Transaction_ID"] == "")
+            ]
+
+            for _, row in new_rows.iterrows():
+                transaction_id = next_available_id
+                next_available_id += 1
+
+                transaction_name = row["Transaction Name"]
+                date = row["Date"]
+                pot_name = row["Pot Name"]
+                amount = (row["Amount"] * -1)
+
+                if transaction_name:
+                    date = convert_date(date)
+                    transactions[f"transaction_{transaction_id}"] = submit_transaction(
+                        con,
+                        transaction_id,
+                        pots,
+                        vaults,
+                        user,
+                        username,
+                        transaction_name,
+                        pot_name,
+                        date,
+                        amount,
+                        transaction_type,
+                    )
+
+                # Balance-transaction logic
+                transaction_pot = next((p for p in pots.values() if p.pot_name == pot_name), None)
+                if not transaction_pot:
+                    continue
+
+                if pot_name in active_pot_names_list and len(transaction_pot.transactions) > 0:
+                    balance_transaction_name = "Balance " + transaction_name
+                    transaction_id += 1
+                    next_available_id += 1
+                    balance_transaction_type = "in"
+                    balance_amount = -amount
+                    transactions[f"transaction_{transaction_id}"] = balance_transaction(
+                        con,
+                        transaction_id,
+                        pots,
+                        vaults,
+                        balances,
+                        previous_balances,
+                        user,
+                        username,
+                        balance_transaction_name,
+                        pot_name,
+                        date,
+                        balance_amount,
+                        balance_transaction_type,
+                    )
+
+            # Update all transactions in DB
+            transactions_edited_df.columns = transactions_edited_df.columns.str.replace(" ", "_")
+
+            for row in transactions_edited_df.itertuples(index=False):
+                row_dict = row._asdict()
+                transaction_id = row_dict.get("Transaction_ID")
+                transaction_name = row_dict.get("Transaction_Name")
+                date = row_dict.get("Date")
+                pot_name = row_dict.get("Pot_Name")
+                amount = (row_dict.get("Amount") * -1)
+
+                if transaction_name:
+                    date = convert_date(date)
+                    update_transaction(
+                        con,
+                        transaction_id,
+                        pots,
+                        vaults,
+                        user,
+                        username,
+                        transaction_name,
+                        pot_name,
+                        date,
+                        amount,
+                        transaction_type,
+                    )
+
+            # 🔄 Refresh everything from the DB (ensures Transaction_IDs are up to date)
+            vaults, vault_ids, pots, pot_ids, transactions, transaction_ids, balances, previous_balances = refresh_user_data(con, user, username)
+            pots, vaults = refresh_pot_vault_values(pots, vaults)
+
+            # 🧱 Rebuild fresh DataFrame from updated DB (like Budgets tab)
+            transactions_final_list = []
+            for transaction in transactions.values():
+                if transaction.manual_transaction == 0 or transaction.balance_transaction == 1:
+                    continue
+                transactions_final_list.append({
+                    "Transaction_ID": f"{transaction.transaction_id}",
+                    "Transaction Name": f"{transaction.transaction_name}",
+                    "Date": transaction.date.strftime("%d/%m/%y"),
+                    "Pot Name": pot_names_dict.get(str(transaction.pot_id), ""),
+                    "Amount": (transaction.amount * -1),
+                })
+
+            if len(transactions_final_list) == 0:
+                transactions_final_df = pd.DataFrame(
+                    [{"Transaction_ID": None, "Transaction Name": None, "Date": None, "Pot Name": None, "Amount": None}]
+                )
+                transactions_final_df["Date"] = pd.to_datetime(transactions_final_df["Date"], errors="coerce")
+            else:
+                transactions_final_df = pd.DataFrame(transactions_final_list)
+                transactions_final_df["Date"] = pd.to_datetime(transactions_final_df["Date"], format="%d/%m/%y", errors="coerce")
+
+            # Save to session and refresh
             st.session_state.transactions_submitted = True
-            # Submit to session state
-            st.session_state.transactions_final = final_df.copy()
+            st.session_state.transactions_final = transactions_final_df.copy()
+
+            if "transactions_editor" in st.session_state:
+                del st.session_state["transactions_editor"]
+
+            st.rerun()
 
     else:
-        # Rerender table using session state values
+        # Display final table in read-only mode
         st.data_editor(
             st.session_state.transactions_final,
             disabled=True,
             key="transactions_final_view",
         )
-        
-        # Reset flag before rerun
         st.session_state.transactions_submitted = False
-    
-  
+        st.rerun()
+
+
 elif selected == "Instructions":
-    st.markdown(
-    """
-    <iframe width="950" height="600" src="https://www.youtube.com/embed/lrfcxQguHVk?si=i2OkK9OduA3l9Tqo" title="YouTube video player" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share" referrerpolicy="strict-origin-when-cross-origin" allowfullscreen></iframe>
-    """,
-    unsafe_allow_html=True
-)
+    st.markdown("""### Introduction
+                
+Money Pots helps you manage your travel savings on long trips.
+All you need is a separate bank account loaded with your trip funds. From there, you can use Money Pots to plan and track your budget for each part of your journey.
+ 
+### Categories
+
+Your money is divided into two main categories:
+
+##### Daily Expenses
+For everyday costs such as food, drinks, hotels, tourist activities, and souvenirs.
+
+##### Other 
+For planned or unexpected expenses that arent part of your daily spending, like phone bills, insurance payments, or repairs.
+
+### Creating Pots
+
+Within each category, you can create individual Pots in the Budgets tab.
+
+For example, under **Daily Expenses**, you might create a Pot for each destination on your trip.  
+To set a budget, enter your planned **daily expenditure** (e.g. $100/day) and the **start and end dates** for that location.  
+
+Using this data, Money Pots automatically generates a **forecast graph** showing whether your spending is on track throughout your trip.
+
+##### Tracking and Updates
+
+Your **daily expenditure** is automatically calculated each time you enter your **bank and cash balances**, which you can update as often as you like.  
+
+If you would like to add more detail to your spending, you can also submit daily expenditures manually in the **Transactions** tab.
+
+### **Other** Category
+
+For the **Other** category, Pot balances are updated manually. Simply create a **Transaction** whenever you make a payment from your bank.  
+
+*This works best if you dont have any direct debits set up on the account you are using*
+""", unsafe_allow_html=True)
 
 elif selected == "Account":
     database_password = "password"
