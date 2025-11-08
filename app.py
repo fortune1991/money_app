@@ -203,7 +203,7 @@ if selected == "Dashboard":
     
     if display_graph == "Pot Spending Forecast":
         # Plot Forecast
-        fig = pot_forecast(pots,active_pot)
+        fig = pot_forecast(con,pots,active_pot,balances)
         st.pyplot(fig)
 
     else:

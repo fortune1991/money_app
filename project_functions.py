@@ -978,7 +978,7 @@ def previous_balances_variable(con,username):
     cur.close()
     return previous_balances
 
-def pot_forecast(pots, pot_name, dynamic_width=True):
+def pot_forecast(con, pots, pot_name, balances, dynamic_width=True):
     # Assign pot to a variable
     pot = next((p for p in pots.values() if p.pot_name == pot_name), None)
     if pot is None:
@@ -1009,9 +1009,65 @@ def pot_forecast(pots, pot_name, dynamic_width=True):
     if pot is None:
         actual_balance = 0
         actual_date = convert_date("2025-01-01")
+
     else:
-        actual_balance = pot.pot_value()
-        actual_date = datetime.datetime.today()
+        # Create balances_df.
+        cur = con.cursor()
+        cur.execute("SELECT * FROM balances WHERE username = ?", (balances.username,))
+        result = cur.fetchall()
+        
+        balances_df = pd.DataFrame(
+            result,
+            columns=[
+                "Balance_ID", "Username", "Date", "Bank_Currency", "Cash_Currency",
+                "Bank_Balance", "Cash_Balance", "Active_Pot"
+            ]
+        )
+
+        # Create pot_budget variable
+        pot_budget = pot.amount
+
+        # Compute cumulative spend based on differences in balances
+        # First compute total balance
+        balances_df["Total_Balance"] = balances_df["Bank_Balance"] + balances_df["Cash_Balance"]
+
+        # Sort by date (already done)
+        balances_df.sort_values("Date", inplace=True)
+
+        # Compute spend between consecutive rows
+        balances_df["Spend"] = balances_df["Total_Balance"].diff(periods=1) * -1  # positive if balance decreases
+
+        # Only keep positive spends, ignore deposits
+        balances_df["Spend"] = balances_df["Spend"].clip(lower=0)
+
+        # Fill NaN in first row with 0 (because there’s no previous row)
+        balances_df["Spend"].iloc[0] = 0
+
+        # Cumulative spend & remaining budget
+        balances_df["Cumulative_Spend"] = balances_df["Spend"].cumsum()
+        balances_df["Remaining_Budget"] = pot_budget - balances_df["Cumulative_Spend"]
+
+        # Keep only needed columns
+        balances_df = balances_df[["Date", "Remaining_Budget"]]
+
+    # --- Align actual balances to forecast start date ---
+    df["Date"] = pd.to_datetime(df["Date"])
+    balances_df["Date"] = pd.to_datetime(balances_df["Date"])
+
+    forecast_start = df["Date"].min()
+    first_actual = balances_df["Date"].min()
+
+    if forecast_start < first_actual:
+        # Add a starting row equal to pot_budget at midnight
+        new_row = pd.DataFrame({
+            "Date": [pd.Timestamp.combine(forecast_start.date(), datetime.time(0, 0, 0))],
+            "Remaining_Budget": [pot_budget]
+        })
+
+        balances_df = pd.concat([new_row, balances_df], ignore_index=True)
+        balances_df = balances_df.sort_values("Date", ignore_index=True)
+
+    print(balances_df)
 
     # --- Seaborn theme (match existing) ---
     sns.set_theme(style="darkgrid", palette="Blues_d")
@@ -1030,16 +1086,33 @@ def pot_forecast(pots, pot_name, dynamic_width=True):
     # --- Create figure ---
     fig, ax = plt.subplots(figsize=(8, 6))
 
-    # --- Plot forecast line ---
-    ax.plot(df["Date"], df["Forecast Balance"], color="#61b27eff",
-            linewidth=2.5, label="Forecast Balance")
+    # --- Plot forecast line (existing) ---
+    ax.plot(
+        df["Date"], df["Forecast Balance"],
+        color="#61b27eff",
+        linewidth=2.5,
+        label="Forecast Balance"
+    )
 
-    # --- Plot actual balance point ---
-    ax.scatter(actual_date, actual_balance, color="#fdb43fff", s=100,
-               edgecolor="white", linewidth=1.5, zorder=5, label="Actual Balance")
+    # --- Plot actual (balances_df) line ---
+    ax.plot(
+        balances_df["Date"], balances_df["Remaining_Budget"],
+        color="#fdb43fff",
+        linewidth=2.5,
+        linestyle="--",
+        label="Actual Balance"
+    )
+
+    # --- Highlight last actual point ---
+    last_row = balances_df.iloc[-1]
+    ax.scatter(
+        last_row["Date"], last_row["Remaining_Budget"],
+        color="#fdb43fff", s=100,
+        edgecolor="white", linewidth=1.5, zorder=5
+    )
 
     # --- Style axes ---
-    ax.set_title(f"Active Pot Spending Forecast", pad=20)
+    ax.set_title("Active Pot Spending Forecast", pad=20)
     ax.set_xlabel("Date")
     ax.set_ylabel("Balance ($)")
     ax.set_ylim(bottom=0)
@@ -1058,7 +1131,7 @@ def pot_forecast(pots, pot_name, dynamic_width=True):
 
     sns.despine(left=True, bottom=True)
     plt.tight_layout()
-    
+
     return fig  # for Streamlit compatibility
     
 def pot_dict(pots):
