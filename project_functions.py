@@ -5,6 +5,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import numpy as np
 import pandas as pd
+import requests
 import seaborn as sns
 import streamlit as st
 from datetime import timedelta
@@ -1022,13 +1023,8 @@ def pot_forecast(con, pots, pot_name, balances, dynamic_width=True):
     if pot is None:
         actual_balance = 0
         actual_date = convert_date("2025-01-01")
-        balances_df = pd.DataFrame({
-        "Date": [actual_date],
-        "Remaining_Budget": [actual_balance]
-    })
-
     else:
-        # Create balances_df.
+        # Create balances_df
         cur = con.cursor()
         cur.execute("SELECT * FROM balances WHERE username = ?", (balances.username,))
         result = cur.fetchall()
@@ -1041,50 +1037,51 @@ def pot_forecast(con, pots, pot_name, balances, dynamic_width=True):
             ]
         )
 
-        # Create pot_budget variable
         pot_budget = pot.amount
 
-        # Compute cumulative spend based on differences in balances
-        # First compute total balance
-        balances_df["Total_Balance"] = balances_df["Bank_Balance"] + balances_df["Cash_Balance"]
+        # --- FIX: Compare only last row for currencies ---
+        last_bank_currency = balances_df["Bank_Currency"].iloc[-1]
+        last_cash_currency = balances_df["Cash_Currency"].iloc[-1]
 
-        # Sort by date (already done)
+        # Compute Total_Balance per row
+        if last_cash_currency != last_bank_currency:
+            # Fetch conversion rate
+            conversion_list = requests.get(
+                f"https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/{last_bank_currency.lower()}.json"
+            ).json()
+            conversion_value = conversion_list[last_bank_currency.lower()][last_cash_currency.lower()]
+            balances_df["Total_Balance"] = balances_df["Bank_Balance"] + balances_df["Cash_Balance"] / conversion_value
+        else:
+            balances_df["Total_Balance"] = balances_df["Bank_Balance"] + balances_df["Cash_Balance"]
+
         balances_df.sort_values("Date", inplace=True)
 
-        # Compute spend between consecutive rows
-        balances_df["Spend"] = balances_df["Total_Balance"].diff(periods=1) * -1  # positive if balance decreases
-
-        # Only keep positive spends, ignore deposits
+        # Spend between consecutive rows
+        balances_df["Spend"] = balances_df["Total_Balance"].diff(periods=1) * -1
         balances_df["Spend"] = balances_df["Spend"].clip(lower=0)
-
-        # Fill NaN in first row with 0 (because there’s no previous row)
         balances_df.loc[0, "Spend"] = 0
 
-        # Cumulative spend & remaining budget
         balances_df["Cumulative_Spend"] = balances_df["Spend"].cumsum()
         balances_df["Remaining_Budget"] = pot_budget - balances_df["Cumulative_Spend"]
 
-        # Keep only needed columns
         balances_df = balances_df[["Date", "Remaining_Budget"]]
 
-    # Align actual balances to forecast start date
+    # --- Align actual balances to forecast start date ---
     df["Date"] = pd.to_datetime(df["Date"])
-    balances_df["Date"] = pd.to_datetime(balances_df["Date"], format='mixed', errors='coerce')
+    balances_df["Date"] = pd.to_datetime(balances_df["Date"])
 
     forecast_start = df["Date"].min()
     first_actual = balances_df["Date"].min()
 
     if forecast_start < first_actual:
-        # Add a starting row equal to pot_budget at midnight
         new_row = pd.DataFrame({
             "Date": [pd.Timestamp.combine(forecast_start.date(), datetime.time(0, 0, 0))],
             "Remaining_Budget": [pot_budget]
         })
-
         balances_df = pd.concat([new_row, balances_df], ignore_index=True)
         balances_df = balances_df.sort_values("Date", ignore_index=True)
 
-    # --- Seaborn theme (match existing) ---
+    # --- Seaborn theme ---
     sns.set_theme(style="darkgrid", palette="Blues_d")
     plt.rcParams.update({
         "axes.titlesize": 14,
@@ -1101,53 +1098,31 @@ def pot_forecast(con, pots, pot_name, balances, dynamic_width=True):
     # --- Create figure ---
     fig, ax = plt.subplots(figsize=(8, 6))
 
-    # --- Plot forecast line (existing) ---
-    ax.plot(
-        df["Date"], df["Forecast Balance"],
-        color="#61b27eff",
-        linewidth=2.5,
-        label="Forecast Balance"
-    )
+    # Plot forecast
+    ax.plot(df["Date"], df["Forecast Balance"], color="#61b27eff", linewidth=2.5, label="Forecast Balance")
+    # Plot actual
+    ax.plot(balances_df["Date"], balances_df["Remaining_Budget"], color="#fdb43fff", linewidth=2.5, linestyle="--", label="Actual Balance")
 
-    # --- Plot actual (balances_df) line ---
-    ax.plot(
-        balances_df["Date"], balances_df["Remaining_Budget"],
-        color="#fdb43fff",
-        linewidth=2.5,
-        linestyle="--",
-        label="Actual Balance"
-    )
-
-    # --- Highlight last actual point ---
+    # Highlight last actual point
     last_row = balances_df.iloc[-1]
-    ax.scatter(
-        last_row["Date"], last_row["Remaining_Budget"],
-        color="#fdb43fff", s=100,
-        edgecolor="white", linewidth=1.5, zorder=5
-    )
+    ax.scatter(last_row["Date"], last_row["Remaining_Budget"], color="#fdb43fff", s=100, edgecolor="white", linewidth=1.5, zorder=5)
 
-    # --- Style axes ---
+    # Style axes
     ax.set_title("Active Pot Spending Forecast", pad=20)
     ax.set_xlabel("Date")
     ax.set_ylabel("Balance ($)")
     ax.set_ylim(bottom=0)
 
-    # Format date axis
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %d"))
     plt.gcf().autofmt_xdate()
 
-    # --- Legend below chart (same style) ---
-    ax.legend(
-        title="Key",
-        bbox_to_anchor=(0.5, -0.2),
-        loc="upper center",
-        ncol=2,
-    )
+    # Legend
+    ax.legend(title="Key", bbox_to_anchor=(0.5, -0.2), loc="upper center", ncol=2)
 
     sns.despine(left=True, bottom=True)
     plt.tight_layout()
 
-    return fig  # for Streamlit compatibility
+    return fig
     
 def pot_dict(pots):
     pot_dict = {}
