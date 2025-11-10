@@ -143,9 +143,14 @@ if selected == "Dashboard":
         balance_update(con,balances,balances.bank_balance,balances.cash_balance,active_pot_names_list,balances.bank_currency,balances.cash_currency,active_pot)
 
     with col2:
-        #bank_balance
+        # Bank balance tracker
         db_bank_balance = balances.bank_balance
-        bank_balance = st.text_input("Current bank balance:", f"{db_bank_balance}")
+        if "bank_balance_input" not in st.session_state:
+            st.session_state.bank_balance_input = db_bank_balance
+        bank_balance = st.text_input(
+            "Current bank balance:", 
+            value=str(st.session_state.bank_balance_input)
+        )
         balances.update_bank_balance(bank_balance)
 
     with col3:
@@ -159,9 +164,14 @@ if selected == "Dashboard":
         balances.update_bank_currency(bank_currency)
 
     with col4:
-        #cash_balance
+        # Cash balance tracker
         db_cash_balance = balances.cash_balance
-        cash_balance = st.text_input("Current cash balance:", f"{db_cash_balance}")
+        if "cash_balance_input" not in st.session_state:
+            st.session_state.cash_balance_input = db_cash_balance
+        cash_balance = st.text_input(
+            "Current cash balance:", 
+            value=str(st.session_state.cash_balance_input)
+        )
         balances.update_cash_balance(cash_balance)
 
 
@@ -184,8 +194,23 @@ if selected == "Dashboard":
         )
 
     # SUBMIT THESE COLUMNS TO THE DATABASE
-    if float(db_bank_balance) != float(bank_balance) or str(db_bank_currency) != str(bank_currency) or float(db_cash_balance) != float(cash_balance) or str(db_cash_currency) != str(cash_currency):
-        balance_update(con,balances,bank_balance,cash_balance,pot_names_list,bank_currency,cash_currency,active_pot,)
+    if float(db_bank_balance) != float(bank_balance) or float(db_cash_balance) != float(cash_balance):
+        bank_reduction = float(db_bank_balance) - float(bank_balance)
+        cash_reduction = float(db_cash_balance) - float(cash_balance)
+        total_reduction = bank_reduction + cash_reduction
+
+        active_pot_obj = next((p for p in pots.values() if p.pot_name == active_pot), None)
+        active_pot_balance = active_pot_obj.pot_value() if active_pot_obj else 0
+
+        if total_reduction > active_pot_balance:
+            msg = st.empty()
+            msg.error("Error: Total reduction exceeds the active pot balance! Refresh page to proceed")
+            st.stop()
+
+        # --- END CHECK ---
+        
+        # Update balances normally
+        balance_update(con, balances, bank_balance, cash_balance, pot_names_list, bank_currency, cash_currency, active_pot)
         msg = st.empty()
         msg.success("Balance updates submitted")
         sleep(2)
