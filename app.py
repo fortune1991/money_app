@@ -14,7 +14,7 @@ pots = {}
 transactions = {}
 currency_list = ("USD", "EUR", "GBP", "JPY", "AUD", "NZD", "CAD", "CHF", "THB", "SGD", "HKD", "CNY", "KRW", "INR", "IDR", "MYR", "PHP", "VND", "ZAR", "AED", "MXN", "TRY", "SEK", "NOK", "DKK")
 
-db_path = "/Users/michaelfortune/Developer/projects/money/money_app/money.db"
+db_path = "money.db"
 database_exists = os.path.isfile(db_path)
 
 # Establish a connection to the Database
