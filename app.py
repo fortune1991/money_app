@@ -1,9 +1,9 @@
-import datetime,os,sqlite3,math
+import datetime,os,sqlite3,math,io
 import pandas as pd
 import streamlit as st
 
 from project_classes import User,Vault,Pot,Transaction,Balances
-from project_functions import submit_transaction,convert_date,summary,create_pot,create_user,create_vault,create_profile,re_user,re_vaults,re_pots,re_transactions,re_balances,count_pots,count_transactions,count_vaults,transaction_summary,del_profile,del_vault,del_pot,del_transaction,user_exist,refresh_user_data,refresh_pot_vault_values,balance_update,auto_transaction,previous_balances_variable,pot_forecast,pot_dict,update_pot,update_transaction,active_pot_dict,balance_transaction
+from project_functions import submit_transaction,convert_date,summary,create_pot,create_user,create_vault,create_profile,re_user,re_vaults,re_pots,re_transactions,re_balances,count_pots,count_transactions,count_vaults,transaction_summary,del_profile,del_vault,del_pot,del_transaction,user_exist,refresh_user_data,refresh_pot_vault_values,balance_update,auto_transaction,previous_balances_variable,pot_forecast,pot_dict,update_pot,update_transaction,active_pot_dict,balance_transaction,undo_last_balance
 from streamlit_option_menu import option_menu
 from tabulate import tabulate
 from time import sleep
@@ -140,7 +140,7 @@ if selected == "Dashboard":
         )
         balances.update_active_pot(balances, active_pot_names_list, active_pot)
         # Submit Balances to DB
-        balance_update(con,balances,balances.bank_balance,balances.cash_balance,active_pot_names_list,active_pot)
+        balance_update(con,balances,balances.bank_balance,balances.cash_balance,active_pot_names_list,balances.bank_currency,balances.cash_currency,active_pot)
 
     with col2:
         #bank_balance
@@ -185,7 +185,7 @@ if selected == "Dashboard":
 
     # SUBMIT THESE COLUMNS TO THE DATABASE
     if float(db_bank_balance) != float(bank_balance) or str(db_bank_currency) != str(bank_currency) or float(db_cash_balance) != float(cash_balance) or str(db_cash_currency) != str(cash_currency):
-        balance_update(con,balances,bank_balance,cash_balance,pot_names_list,active_pot)
+        balance_update(con,balances,bank_balance,cash_balance,pot_names_list,bank_currency,cash_currency,active_pot,)
         msg = st.empty()
         msg.success("Balance updates submitted")
         sleep(2)
@@ -208,8 +208,41 @@ if selected == "Dashboard":
 
     else:
         # Plot summary chart
-        fig = summary(vaults, pots)
-        st.pyplot(fig)
+        fig = summary(vaults, pots, dynamic_width=True)
+
+        # Assume 'fig' is your Matplotlib figure
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", dpi=150, bbox_inches='tight')
+        buf.seek(0)
+
+        # Scrollable wrapper
+        st.markdown("""
+        <div style="overflow-x:auto; overflow-y:hidden; width:100%;">
+        """, unsafe_allow_html=True)
+
+        # Use `use_container_width=False` to prevent auto-scaling
+        st.image(buf, use_container_width=False)
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    undo = None
+    col1, col2, col3 = st.columns([2.4,1,2])
+    with col2:
+        if st.button("Undo Last Balance Update"):
+            undo = undo_last_balance(con, balances.username)
+
+    if undo == True:
+        msg = st.empty()
+        st.success("Undo successful — reverted to previous balance.")
+        sleep(2)
+        msg.empty()
+        st.rerun()
+    elif undo == False:
+        msg = st.empty()
+        st.warning("No previous balance entry found to undo.")
+        sleep(2)
+        msg.empty()
+    else:
+        pass
 
 elif selected == "Budgets":
     # Refresh user data
@@ -397,6 +430,20 @@ elif selected == "Budgets":
         if balances.bank_balance == 0 and balances.cash_balance == 0:
             st.error("Must update bank and cash balances before creating new pots")
             st.stop()
+
+        if (edited_df["Pot Budget"].isna() | (edited_df["Pot Budget"] <= 0)).any():
+            msg = st.empty()
+            msg.error("Pot Budget must be greater than 0")
+            sleep(3)
+            msg.empty()
+            st.rerun()
+
+        if (edited_df["Daily Allowance"].isna() | (edited_df["Daily Allowance"] <= 0)).any():
+            msg = st.empty()
+            msg.error("Daily Allowance must be greater than 0")
+            sleep(3)
+            msg.empty()
+            st.rerun()
 
         # Remove empty rows, check expected cols and save
         expected_cols = [

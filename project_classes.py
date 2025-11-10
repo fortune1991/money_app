@@ -285,20 +285,20 @@ class Balances:
         raise TypeError(f"Invalid type for convert_date_balances: {type(date_input)}. Expected str, datetime, or pd.Timestamp.")
 
     def update_bank_currency(self, currency):
-        """Function to update User's home bank currency"""
-        if currency in ["USD", "EUR", "GBP", "JPY", "AUD", "NZD", "CAD", "CHF", "THB", "SGD", "HKD", "CNY", "KRW", "INR", "IDR", "MYR", "PHP", "VND", "ZAR", "AED", "MXN", "TRY", "SEK", "NOK", "DKK"]:
+        """Update user's bank currency."""
+        valid = ["USD", "EUR", "GBP", "JPY", "AUD", "NZD", "CAD", "CHF", "THB", "SGD", "HKD", "CNY", "KRW", "INR", "IDR", "MYR", "PHP", "VND", "ZAR", "AED", "MXN", "TRY", "SEK", "NOK", "DKK"]
+        if currency in valid:
             self.bank_currency = currency
             return f"User's bank currency updated to {currency}"
-        else:
-            return f"This currency can't be found. User's bank currency remains as {self.bank_currency}"
+        return f"Invalid currency: {currency}. Bank currency remains {self.bank_currency}"
 
     def update_cash_currency(self, currency):
-        """Function to update the type of currency in use by the User"""
-        if currency in ["USD", "EUR", "GBP", "JPY", "AUD", "NZD", "CAD", "CHF", "THB", "SGD", "HKD", "CNY", "KRW", "INR", "IDR", "MYR", "PHP", "VND", "ZAR", "AED", "MXN", "TRY", "SEK", "NOK", "DKK"]:
-            self.bank_currency = currency
-            return f"User's cash currency type updated to {currency}"
-        else:
-            return f"This currency can't be found. User's cash currency type remains as {self.bank_currency}"
+        """Update user's cash currency."""
+        valid = ["USD", "EUR", "GBP", "JPY", "AUD", "NZD", "CAD", "CHF", "THB", "SGD", "HKD", "CNY", "KRW", "INR", "IDR", "MYR", "PHP", "VND", "ZAR", "AED", "MXN", "TRY", "SEK", "NOK", "DKK"]
+        if currency in valid:
+            self.cash_currency = currency
+            return f"User's cash currency updated to {currency}"
+        return f"Invalid currency: {currency}. Cash currency remains {self.cash_currency}"
     
     def update_bank_balance(self, balance) -> str:
         """Updates a User's bank balance"""

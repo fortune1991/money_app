@@ -1,6 +1,8 @@
 import datetime,os,sqlite3,math
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
+import plotly.express as px
+import plotly.graph_objects as go
 import numpy as np
 import pandas as pd
 import seaborn as sns
@@ -340,17 +342,17 @@ def summary(vaults, pots, dynamic_width=True):
         pot_value = 0
         vault_amount = 0
         initial_amount = 0
-        data.append(['Vault Name: ' + '\n' + 'Initial Amount: $' + f'{vault_amount}', 'no pots created' + f'\n${pot_value}', 'Initial Amount', initial_amount])
-        data.append(['Vault Name: ' + '\n' + 'Initial Amount: $' + f'{vault_amount}', 'no pots created' + f'\n${pot_value}', 'Remaining Balance', pot_value])
+        data.append(['Daily Expenses', 'no pots created', 'Initial Amount', initial_amount])
+        data.append(['Daily Expenses', 'no pots created', 'Remaining Balance', pot_value])
     else:
         for i in vaults:
             vault = vaults[i]
-            vault_amount = vault.initial_vault_value()
+            vault_name_clean = vault.vault_name  # keep vault name only
             for j in pots:
                 if pots[j].vault == vault:
                     pot_value = pots[j].pot_value()
-                    data.append(['Vault Name: ' + vault.vault_name + '\n' + 'Initial Amount: $' + f'{vault_amount}', pots[j].pot_name + f'\n${pot_value}', 'Initial Amount', pots[j].amount])
-                    data.append(['Vault Name: ' + vault.vault_name + '\n' + 'Initial Amount: $' + f'{vault_amount}', pots[j].pot_name + f'\n${pot_value}', 'Remaining Balance', pot_value])
+                    data.append([vault_name_clean, pots[j].pot_name, 'Initial Amount', pots[j].amount])
+                    data.append([vault_name_clean, pots[j].pot_name, 'Remaining Balance', pot_value])
 
     df = pd.DataFrame(data, columns=['Vault', 'Pot', 'Metric', 'Amount ($)'])
     pivot_df = df.pivot_table(index=['Vault', 'Pot'], columns='Metric', values='Amount ($)', fill_value=0).reset_index()
@@ -374,10 +376,7 @@ def summary(vaults, pots, dynamic_width=True):
     num_pots = len(pots_unique)
 
     # Dynamic sizing
-    if dynamic_width:
-        fig_width = min(max(6, len(vaults_unique) * len(pots_unique) * 1.5), 16)
-    else:
-        fig_width = 8
+    fig_width = max(10, num_pots * 1.2)  # figure width grows with number of pots
     fig_height = 6
     fig, ax = plt.subplots(figsize=(fig_width, fig_height))
 
@@ -386,13 +385,11 @@ def summary(vaults, pots, dynamic_width=True):
         'Remaining Balance': '#61b27eff',
     }
 
-    # Bar width and vault spacing
-    bar_width = max(0.15, 0.6 / num_pots)
+    bar_width = max(0.25, 0.6 / num_pots)
     vault_spacing = 0.1
     vault_positions = np.arange(len(vaults_unique)) * vault_spacing
-
-    # Plot bars and track vault centers
     vault_centers = []
+
     for i, vault in enumerate(vaults_unique):
         vault_data = pivot_df[pivot_df['Vault'] == vault]
         x_positions = []
@@ -402,11 +399,10 @@ def summary(vaults, pots, dynamic_width=True):
             if not row.empty:
                 initial = row['Initial Amount'].values[0]
                 remaining = row['Remaining Balance'].values[0]
-
-                # Center bars per vault
                 x = vault_positions[i] + (j - (len(vault_data)-1)/2) * bar_width
                 x_positions.append(x)
 
+                # Draw bars
                 ax.bar(x, initial, width=bar_width, color=colors['Initial Amount'],
                        edgecolor='white', alpha=0.8,
                        label='Initial Amount' if i == 0 and j == 0 else "")
@@ -414,11 +410,10 @@ def summary(vaults, pots, dynamic_width=True):
                        edgecolor='white', alpha=0.9,
                        label='Remaining Balance' if i == 0 and j == 0 else "")
 
-                # Label the pot
+                # Pot label inside bar (only name, smaller font)
                 ax.text(x, remaining / 2, pot, ha='center', va='center',
-                        color='white', fontsize=9, fontweight='bold')
+                        color='white', fontsize=7, fontweight='bold', wrap=True)
 
-        # Compute center for vault label
         vault_centers.append(np.mean(x_positions) if x_positions else vault_positions[i])
 
     # Vault labels centered
@@ -427,22 +422,12 @@ def summary(vaults, pots, dynamic_width=True):
 
     ax.set_ylabel('Amount ($)', fontsize=12, fontweight='bold')
     ax.set_title('Summary of Pot Balances', fontsize=14, fontweight='bold', pad=20)
-
-    # Legend below chart
-    ax.legend(
-        title='Key',
-        bbox_to_anchor=(0.5, -0.2),
-        loc='upper center',
-        ncol=2,
-    )
-
-    # Set low limit for amount as 0
+    ax.legend(title='Key', bbox_to_anchor=(0.5, -0.2), loc='upper center', ncol=2)
     ax.set_ylim(bottom=0)
-
     sns.despine(left=True, bottom=True)
     plt.tight_layout()
 
-    return fig  # Return fig for Streamlit (use st.pyplot(fig, use_container_width=True))
+    return fig
 
 def transaction_summary(transactions): 
     table = []
@@ -636,17 +621,45 @@ def create_profile(con):
     summary(vaults,pots)
     return user,vaults, vault_ids,pots,pot_ids,transactions,transaction_ids,balances
     
-def balance_update(con, balances, bank_balance, cash_balance, pot_names_list, active_pot=None):
+
+def balance_update(con, balances, bank_balance, cash_balance, pot_names_list, bank_currency, cash_currency, active_pot=None):
     # New timestamp
     date = datetime.datetime.today()
-    # Update object
+    # Connect to the db
+    cur = con.cursor()
+
+    # Fetch latest recorded balance for this user
+    cur.execute("""
+        SELECT bank_balance, cash_balance, bank_currency, cash_currency, active_pot
+        FROM balances
+        WHERE username = ?
+        ORDER BY date DESC
+        LIMIT 1
+    """, (balances.username,))
+    last = cur.fetchone()
+
+    # Detect if any change occurred 
+    if last:
+        last_bank_balance, last_cash_balance, last_bank_currency, last_cash_currency, last_active_pot = last
+        if (
+            float(last_bank_balance) == float(bank_balance) and
+            float(last_cash_balance) == float(cash_balance) and
+            last_bank_currency == bank_currency and
+            last_cash_currency == cash_currency and
+            last_active_pot == active_pot
+        ):
+            # No changes — skip updating
+            cur.close()
+            return balances
+
+    # Something changed → Update object and insert new row
     balances.update_date(date)
     balances.update_bank_balance(bank_balance)
     balances.update_cash_balance(cash_balance)
+    balances.update_bank_currency(bank_currency)
+    balances.update_cash_currency(cash_currency)
     if active_pot is not None:
-        balances.update_active_pot(balances,pot_names_list,active_pot)
-
-    cur = con.cursor()
+        balances.update_active_pot(balances, pot_names_list, active_pot)
 
     # Get the current highest balance_id for this user
     cur.execute("SELECT MAX(balance_id) FROM balances WHERE username = ?", (balances.username,))
@@ -668,7 +681,7 @@ def balance_update(con, balances, bank_balance, cash_balance, pot_names_list, ac
         balances.active_pot
     )
 
-    # Insert a new row
+    # Insert new row
     cur.execute("INSERT INTO balances VALUES (?,?,?,?,?,?,?,?)", balances_data)
     con.commit()
     cur.close()
@@ -1009,6 +1022,10 @@ def pot_forecast(con, pots, pot_name, balances, dynamic_width=True):
     if pot is None:
         actual_balance = 0
         actual_date = convert_date("2025-01-01")
+        balances_df = pd.DataFrame({
+        "Date": [actual_date],
+        "Remaining_Budget": [actual_balance]
+    })
 
     else:
         # Create balances_df.
@@ -1041,7 +1058,7 @@ def pot_forecast(con, pots, pot_name, balances, dynamic_width=True):
         balances_df["Spend"] = balances_df["Spend"].clip(lower=0)
 
         # Fill NaN in first row with 0 (because there’s no previous row)
-        balances_df["Spend"].iloc[0] = 0
+        balances_df.loc[0, "Spend"] = 0
 
         # Cumulative spend & remaining budget
         balances_df["Cumulative_Spend"] = balances_df["Spend"].cumsum()
@@ -1050,9 +1067,9 @@ def pot_forecast(con, pots, pot_name, balances, dynamic_width=True):
         # Keep only needed columns
         balances_df = balances_df[["Date", "Remaining_Budget"]]
 
-    # --- Align actual balances to forecast start date ---
+    # Align actual balances to forecast start date
     df["Date"] = pd.to_datetime(df["Date"])
-    balances_df["Date"] = pd.to_datetime(balances_df["Date"])
+    balances_df["Date"] = pd.to_datetime(balances_df["Date"], format='mixed', errors='coerce')
 
     forecast_start = df["Date"].min()
     first_actual = balances_df["Date"].min()
@@ -1066,8 +1083,6 @@ def pot_forecast(con, pots, pot_name, balances, dynamic_width=True):
 
         balances_df = pd.concat([new_row, balances_df], ignore_index=True)
         balances_df = balances_df.sort_values("Date", ignore_index=True)
-
-    print(balances_df)
 
     # --- Seaborn theme (match existing) ---
     sns.set_theme(style="darkgrid", palette="Blues_d")
@@ -1146,3 +1161,39 @@ def active_pot_dict(pots):
         if pot.vault.vault_name == "Daily expenses":
             active_pot_dict[f"{pot.pot_id}"] = pot.pot_name
     return active_pot_dict
+
+def undo_last_balance(con, username):
+    cur = con.cursor()
+
+    # Get the two most recent balances for this user
+    cur.execute("""
+        SELECT balance_id, date
+        FROM balances
+        WHERE username = ?
+        ORDER BY date DESC
+        LIMIT 2
+    """, (username,))
+    rows = cur.fetchall()
+
+    if len(rows) < 2:
+        cur.close()
+        return False
+
+    latest_id, latest_ts = rows[0]
+    _, prev_ts = rows[1]
+
+    # Delete the latest balance entry
+    cur.execute("DELETE FROM balances WHERE balance_id = ?", (latest_id,))
+
+    # Delete any auto-transactions created after the previous balance timestamp
+    cur.execute("""
+        DELETE FROM transactions
+        WHERE username = ?
+        AND transaction_name LIKE 'auto_transaction_%'
+        AND date > ?
+    """, (username, prev_ts))
+
+    con.commit()
+    cur.close()
+
+    return True
