@@ -3,10 +3,13 @@ import pandas as pd
 import streamlit as st
 
 from project_classes import User,Vault,Pot,Transaction,Balances
-from project_functions import submit_transaction,convert_date,summary,create_pot,create_user,create_vault,create_profile,re_user,re_vaults,re_pots,re_transactions,re_balances,count_pots,count_transactions,count_vaults,transaction_summary,del_profile,del_vault,del_pot,del_transaction,user_exist,refresh_user_data,refresh_pot_vault_values,balance_update,auto_transaction,previous_balances_variable,pot_forecast,pot_dict,update_pot,update_transaction,active_pot_dict,balance_transaction,undo_last_balance
+from project_functions import submit_transaction,convert_date,summary,create_pot,create_user,create_vault,create_profile,re_user,re_vaults,re_pots,re_transactions,re_balances,count_pots,count_transactions,count_vaults,transaction_summary,del_profile,del_vault,del_pot,del_transaction,user_exist,refresh_user_data,refresh_pot_vault_values,balance_update,auto_transaction,previous_balances_variable,pot_forecast,pot_dict,update_pot,update_transaction,active_pot_dict,balance_transaction,undo_last_balance,currency_convert
 from streamlit_option_menu import option_menu
 from tabulate import tabulate
 from time import sleep
+
+if "just_undid_balance" not in st.session_state:
+    st.session_state.just_undid_balance = False
 
 # Initiate back-end
 vaults = {}
@@ -139,17 +142,17 @@ if selected == "Dashboard":
             index=default_index if pot_names_list else None
         )
         balances.update_active_pot(balances, active_pot_names_list, active_pot)
-        # Submit Balances to DB
-        balance_update(con,balances,balances.bank_balance,balances.cash_balance,active_pot_names_list,balances.bank_currency,balances.cash_currency,active_pot)
-
+       
     with col2:
-        # Bank balance tracker
+        # Bank balance tracker - ALWAYS use current database value
         db_bank_balance = balances.bank_balance
-        if "bank_balance_input" not in st.session_state:
-            st.session_state.bank_balance_input = db_bank_balance
+
+        # Update session state to match current database value
+        st.session_state.bank_balance_input = str(db_bank_balance)
+
         bank_balance = st.text_input(
             "Current bank balance:", 
-            value=str(st.session_state.bank_balance_input)
+            value=st.session_state.bank_balance_input
         )
         balances.update_bank_balance(bank_balance)
 
@@ -164,16 +167,17 @@ if selected == "Dashboard":
         balances.update_bank_currency(bank_currency)
 
     with col4:
-        # Cash balance tracker
+        # Cash balance tracker - ALWAYS use current database value
         db_cash_balance = balances.cash_balance
-        if "cash_balance_input" not in st.session_state:
-            st.session_state.cash_balance_input = db_cash_balance
+
+        # Update session state to match current database value
+        st.session_state.cash_balance_input = str(db_cash_balance)
+
         cash_balance = st.text_input(
             "Current cash balance:", 
-            value=str(st.session_state.cash_balance_input)
+            value=st.session_state.cash_balance_input
         )
         balances.update_cash_balance(cash_balance)
-
 
     with col5:
         #cash_currency
@@ -194,10 +198,14 @@ if selected == "Dashboard":
         )
 
     # SUBMIT THESE COLUMNS TO THE DATABASE
-    if float(db_bank_balance) != float(bank_balance) or float(db_cash_balance) != float(cash_balance):
+    if (float(db_bank_balance) != float(bank_balance) or float(db_cash_balance) != float(cash_balance)) and not st.session_state.get('just_undid_balance', False):
         bank_reduction = float(db_bank_balance) - float(bank_balance)
         cash_reduction = float(db_cash_balance) - float(cash_balance)
-        total_reduction = bank_reduction + cash_reduction
+        if db_bank_currency == db_cash_currency:
+            total_reduction = bank_reduction + cash_reduction
+        else:
+            cash_reduction = currency_convert(db_bank_currency, db_cash_currency, cash_reduction)
+            total_reduction = bank_reduction + cash_reduction
 
         active_pot_obj = next((p for p in pots.values() if p.pot_name == active_pot), None)
         active_pot_balance = active_pot_obj.pot_value() if active_pot_obj else 0
@@ -216,6 +224,9 @@ if selected == "Dashboard":
         sleep(2)
         msg.empty()
         st.rerun()
+
+    # Reset the flag after processing
+    st.session_state.just_undid_balance = False
 
     # Create auto_transaction
     transaction_count = count_transactions(con)
@@ -249,25 +260,37 @@ if selected == "Dashboard":
         st.image(buf, use_container_width=False)
         st.markdown("</div>", unsafe_allow_html=True)
 
-    undo = None
-    col1, col2, col3 = st.columns([2.4,1,2])
+    
+    col1, col2, col3 = st.columns([2.4, 1, 2])
     with col2:
         if st.button("Undo Last Balance Update"):
-            undo = undo_last_balance(con, balances.username)
+            # Set flag to prevent auto-submit
+            st.session_state.just_undid_balance = True
 
-    if undo == True:
-        msg = st.empty()
-        st.success("Undo successful — reverted to previous balance.")
-        sleep(2)
-        msg.empty()
-        st.rerun()
-    elif undo == False:
-        msg = st.empty()
-        st.warning("No previous balance entry found to undo.")
-        sleep(2)
-        msg.empty()
-    else:
-        pass
+            undo = undo_last_balance(con, balances.username, balances)
+
+            
+            if undo == True:
+                # Refresh user data to see if anything changed
+                vaults, vault_ids, pots, pot_ids, transactions, transaction_ids, balances, previous_balances = refresh_user_data(con, user, username)
+                pots, vaults = refresh_pot_vault_values(pots, vaults)
+
+                # Update session state to match new balances
+                st.session_state.bank_balance_input = str(balances.bank_balance)
+                st.session_state.cash_balance_input = str(balances.cash_balance)
+
+                msg = st.empty()
+                st.success("Undo successful — reverted to previous balance.")
+                sleep(2)
+                msg.empty()
+                st.rerun()
+
+            elif undo == False:
+                msg = st.empty()
+                st.warning("No previous balance entry found to undo.")
+                sleep(2)
+                msg.empty()
+                    
 
 elif selected == "Budgets":
     # Refresh user data

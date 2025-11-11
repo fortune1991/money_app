@@ -111,6 +111,25 @@ def auto_transaction(con, pots, vaults, user, username, balances, previous_balan
     """
     if active_pot is None:
         return None
+    
+    cur = con.cursor()
+    # determine the balance timestamp you want to generate transactions for (e.g. latest balance row)
+    cur.execute("SELECT date, balance_id FROM balances WHERE username=? ORDER BY datetime(date) DESC LIMIT 1", (username,))
+    row = cur.fetchone()
+    if not row:
+        cur.close()
+        return None
+    latest_balance_date, latest_balance_id = row
+
+    # see if an auto transaction already exists for that balance timestamp
+    cur.execute("""
+        SELECT 1 FROM transactions
+        WHERE username=? AND transaction_name LIKE 'auto_transaction_%' AND datetime(date) >= datetime(?)
+        LIMIT 1
+    """, (username, latest_balance_date))
+    if cur.fetchone():
+        cur.close()
+        return None  # nothing to do: already created
 
     # Calculate signed delta
     delta = balances.combined_balance(balances) - previous_balances.combined_balance(previous_balances)
@@ -146,7 +165,6 @@ def auto_transaction(con, pots, vaults, user, username, balances, previous_balan
         return None  # Nothing to do
 
     # Generate transaction ID
-    cur = con.cursor()
     cur.execute("SELECT MAX(transaction_id) FROM transactions")
     start_transaction = (cur.fetchone()[0] or 0) + 1
 
@@ -1137,7 +1155,7 @@ def active_pot_dict(pots):
             active_pot_dict[f"{pot.pot_id}"] = pot.pot_name
     return active_pot_dict
 
-def undo_last_balance(con, username):
+def undo_last_balance(con, username, balances):
     cur = con.cursor()
 
     # Get the two most recent balances for this user
@@ -1168,7 +1186,34 @@ def undo_last_balance(con, username):
         AND date > ?
     """, (username, prev_ts))
 
+    # Get the desired amounts for objects
+    cur.execute("""
+        SELECT bank_balance, cash_balance
+        FROM balances
+        WHERE username = ?
+        ORDER BY date DESC
+        LIMIT 1
+    """, (username,))
+    rows = cur.fetchall()
+
+    bank_balance, cash_balance = rows[0]
+    
+    # Update objects
+    balances.update_bank_balance(bank_balance)
+    balances.update_cash_balance(cash_balance)
+
     con.commit()
     cur.close()
 
     return True
+
+def currency_convert(base_currency, conversion_currency, conversion_amount):
+    # Get currency conversion list with bank_currency as the base
+        conversion_list = requests.get(f"https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/{base_currency.lower()}.json")
+        formatted_conversion_list = conversion_list.json()
+        conversion_value = formatted_conversion_list[base_currency.lower()][conversion_currency.lower()]
+
+        # Calculate combined_balance
+        converted_currency = conversion_amount / conversion_value
+        
+        return converted_currency
