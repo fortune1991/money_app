@@ -1010,7 +1010,7 @@ def previous_balances_variable(con,username):
     cur.close()
     return previous_balances
 
-def pot_forecast(con, pots, pot_name, balances, dynamic_width=True):
+def pot_forecast(con, pots, pot_name, balances, transactions, dynamic_width=True):
     # Assign pot to a variable
     pot = next((p for p in pots.values() if p.pot_name == pot_name), None)
     if pot is None:
@@ -1042,45 +1042,62 @@ def pot_forecast(con, pots, pot_name, balances, dynamic_width=True):
         actual_balance = 0
         actual_date = convert_date("2025-01-01")
     else:
-        # Create balances_df
-        cur = con.cursor()
-        cur.execute("SELECT * FROM balances WHERE username = ?", (balances.username,))
-        result = cur.fetchall()
-        
-        balances_df = pd.DataFrame(
-            result,
-            columns=[
-                "Balance_ID", "Username", "Date", "Bank_Currency", "Cash_Currency",
-                "Bank_Balance", "Cash_Balance", "Active_Pot"
-            ]
-        )
-
+        # Set pot_budget using pot object
         pot_budget = pot.amount
-
-        # --- FIX: Compare only last row for currencies ---
-        last_bank_currency = balances_df["Bank_Currency"].iloc[-1]
-        last_cash_currency = balances_df["Cash_Currency"].iloc[-1]
-
-        # Compute Total_Balance per row
-        if last_cash_currency != last_bank_currency:
-            # Fetch conversion rate
-            conversion_list = requests.get(
-                f"https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/{last_bank_currency.lower()}.json"
-            ).json()
-            conversion_value = conversion_list[last_bank_currency.lower()][last_cash_currency.lower()]
-            balances_df["Total_Balance"] = balances_df["Bank_Balance"] + balances_df["Cash_Balance"] / conversion_value
+        
+        # FILTER TRANSACTIONS FOR THIS SPECIFIC POT USING THE TRANSACTIONS DICTIONARY
+        pot_transactions = []
+        for transaction_obj in transactions.values():
+            # Check if this transaction belongs to our pot AND is not a balance transaction
+            if (hasattr(transaction_obj, 'pot_id') and transaction_obj.pot_id == pot.pot_id and 
+                transaction_obj.balance_transaction == 0):  # Exclude balance transactions
+                pot_transactions.append({
+                    "Date": transaction_obj.date,
+                    "Type": transaction_obj.type,  # "in" or "out"
+                    "Amount": transaction_obj.amount
+                })
+        
+        if not pot_transactions:
+            # No transactions for this pot - just use starting budget
+            balances_df = pd.DataFrame({
+                "Date": [pd.Timestamp(start_date)],
+                "Remaining_Budget": [pot_budget]
+            })
         else:
-            balances_df["Total_Balance"] = balances_df["Bank_Balance"] + balances_df["Cash_Balance"]
-
-        balances_df.sort_values("Date", inplace=True)
-
-        # Spend between consecutive rows
-        balances_df["Spend"] = balances_df["Total_Balance"].diff(periods=1) * -1
-        balances_df["Spend"] = balances_df["Spend"].clip(lower=0)
-        balances_df.loc[0, "Spend"] = 0
-
-        balances_df["Cumulative_Spend"] = balances_df["Spend"].cumsum()
-        balances_df["Remaining_Budget"] = pot_budget - balances_df["Cumulative_Spend"]
+            # Create transactions DataFrame from the filtered transactions
+            transactions_df = pd.DataFrame(pot_transactions)
+            
+            # Convert dates to datetime
+            transactions_df["Date"] = pd.to_datetime(transactions_df["Date"])
+            
+            # Calculate daily net spending
+            # "out" transactions decrease budget, "in" transactions increase budget
+            daily_summary = transactions_df.groupby("Date").apply(
+                lambda x: pd.Series({
+                    "Net_Spend": (x.loc[x["Type"] == "out", "Amount"].sum()) +  # Spending decreases budget
+                                x.loc[x["Type"] == "in", "Amount"].sum()        # Deposits increase budget
+                }),
+                include_groups=False  # Add this to silence the warning
+            ).reset_index()
+            
+            # Create a date range from pot start to today or pot end
+            today = pd.Timestamp(datetime.date.today())
+            end_date_ts = pd.Timestamp(end_date)
+            last_date = today if today < end_date_ts else end_date_ts
+            
+            date_range = pd.date_range(start=pd.Timestamp(start_date), end=last_date, freq='D')
+            date_df = pd.DataFrame({"Date": date_range})
+            
+            # Merge with daily summary
+            balances_df = date_df.merge(daily_summary, on="Date", how="left")
+            balances_df["Net_Spend"] = balances_df["Net_Spend"].fillna(0)
+            
+            # Calculate cumulative spending and remaining budget
+            balances_df["Cumulative_Spend"] = balances_df["Net_Spend"].cumsum()
+            balances_df["Remaining_Budget"] = pot_budget + balances_df["Cumulative_Spend"]  # ADD because Net_Spend can be negative
+            
+            # Ensure we start at the full budget
+            balances_df.loc[balances_df["Date"] == pd.Timestamp(start_date), "Remaining_Budget"] = pot_budget
 
         balances_df = balances_df[["Date", "Remaining_Budget"]]
 
@@ -1088,12 +1105,11 @@ def pot_forecast(con, pots, pot_name, balances, dynamic_width=True):
     df["Date"] = pd.to_datetime(df["Date"])
     balances_df["Date"] = pd.to_datetime(balances_df["Date"])
 
+    # Ensure we have a point at the forecast start date
     forecast_start = df["Date"].min()
-    first_actual = balances_df["Date"].min()
-
-    if forecast_start < first_actual:
+    if forecast_start not in balances_df["Date"].values:
         new_row = pd.DataFrame({
-            "Date": [pd.Timestamp.combine(forecast_start.date(), datetime.time(0, 0, 0))],
+            "Date": [pd.Timestamp(forecast_start)],
             "Remaining_Budget": [pot_budget]
         })
         balances_df = pd.concat([new_row, balances_df], ignore_index=True)

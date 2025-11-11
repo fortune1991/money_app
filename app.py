@@ -125,7 +125,6 @@ active_pot_names_list = list(active_pot_names_dict.values())
 active_pot_names_list.insert(0,None)
 active_pot = balances.active_pot
 
-
 # Display content based on the selected option
 if selected == "Dashboard":
     col1, col2, col3, col4, col5, col6 = st.columns([1, 1, 0.75, 1, 0.75, 1.5])
@@ -239,7 +238,7 @@ if selected == "Dashboard":
     
     if display_graph == "Pot Spending Forecast":
         # Plot Forecast
-        fig = pot_forecast(con,pots,active_pot,balances)
+        fig = pot_forecast(con,pots,active_pot,balances,transactions)
         st.pyplot(fig)
 
     else:
@@ -830,11 +829,11 @@ elif selected == "Transactions":
                         transaction_type,
                     )
 
-            # 🔄 Refresh everything from the DB (ensures Transaction_IDs are up to date)
+            # Refresh everything from the DB (ensures Transaction_IDs are up to date)
             vaults, vault_ids, pots, pot_ids, transactions, transaction_ids, balances, previous_balances = refresh_user_data(con, user, username)
             pots, vaults = refresh_pot_vault_values(pots, vaults)
 
-            # 🧱 Rebuild fresh DataFrame from updated DB (like Budgets tab)
+            # Rebuild fresh DataFrame from updated DB (like Budgets tab)
             transactions_final_list = []
             for transaction in transactions.values():
                 if transaction.manual_transaction == 0 or transaction.balance_transaction == 1:
