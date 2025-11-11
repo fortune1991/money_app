@@ -889,7 +889,7 @@ Your money is divided into two main categories:
 ##### Daily Expenses
 For everyday costs such as food, drinks, hotels, tourist activities, and souvenirs.
 
-##### Other 
+##### Miscellaneous
 For planned or unexpected expenses that arent part of your daily spending, like phone bills, insurance payments, or repairs.
 
 ### Creating Pots
@@ -907,9 +907,9 @@ Your **daily expenditure** is automatically calculated each time you enter your 
 
 If you would like to add more detail to your spending, you can also submit daily expenditures manually in the **Transactions** tab.
 
-### **Other** Category
+### **Miscellaneous** Category
 
-For the **Other** category, Pot balances are updated manually. Simply create a **Transaction** whenever you make a payment from your bank.  
+For the **Miscellaneous** category, Pot balances are updated manually. Simply create a **Transaction** whenever you make a payment from your bank.  
 
 *This works best if you dont have any direct debits set up on the account you are using*
 """, unsafe_allow_html=True)
