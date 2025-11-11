@@ -257,7 +257,7 @@ if selected == "Dashboard":
         """, unsafe_allow_html=True)
 
         # Use `use_container_width=False` to prevent auto-scaling
-        st.image(buf, use_container_width=False)
+        st.image(buf, width='content')
         st.markdown("</div>", unsafe_allow_html=True)
 
     
