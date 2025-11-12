@@ -440,7 +440,6 @@ def summary(vaults, pots, dynamic_width=True):
     ax.set_xticklabels(vaults_unique, fontsize=11, fontweight='bold')
 
     ax.set_ylabel('Amount ($)', fontsize=12, fontweight='bold')
-    ax.set_title('Summary of Pot Balances', fontsize=14, fontweight='bold', pad=20)
     ax.legend(title='Key', bbox_to_anchor=(0.5, -0.2), loc='upper center', ncol=2)
     ax.set_ylim(bottom=0)
     sns.despine(left=True, bottom=True)
@@ -1142,7 +1141,6 @@ def pot_forecast(con, pots, pot_name, balances, transactions, dynamic_width=True
     ax.scatter(last_row["Date"], last_row["Remaining_Budget"], color="#fdb43fff", s=100, edgecolor="white", linewidth=1.5, zorder=5)
 
     # Style axes
-    ax.set_title("Active Pot Spending Forecast", pad=20)
     ax.set_xlabel("Date")
     ax.set_ylabel("Balance ($)")
     ax.set_ylim(bottom=0)
@@ -1233,3 +1231,71 @@ def currency_convert(base_currency, conversion_currency, conversion_amount):
         converted_currency = conversion_amount / conversion_value
         
         return converted_currency
+
+def financial_status(pots):
+    today = pd.Timestamp(datetime.datetime.today().date())  # Convert to pd timestamp
+    pot_total_budget = 0
+    pot_total_balance = 0
+    colors = ["green", "red", "black"]
+    status = []    
+    
+    for pot in pots.values():
+        # --- Pot balance ---
+        pot_balance = pot.pot_value()
+        pot_total_balance += pot_balance
+        
+        # --- Prepare forecast data ---
+        forecast_data = {}
+        start_date = pd.Timestamp(pot.start_date)
+        end_date = pd.Timestamp(pot.end_date)
+        current_date = start_date
+        amount = pot.amount
+        
+        while current_date <= end_date:
+            forecast_data[current_date] = amount
+            current_date += timedelta(days=1)
+            amount -= pot.daily_expenditure
+
+        # Create DataFrame of forecast
+        df = pd.DataFrame(list(forecast_data.items()), columns=["Date", "Forecast Balance"])
+        print(df)
+
+        # --- Determine which forecast value to use for today ---
+        if today < start_date:
+            # Pot hasn’t started yet — full budget still available
+            pot_total_budget += pot.amount
+
+        elif today > end_date:
+            # Pot is fully completed — nothing left
+            pot_total_budget += 0
+
+        else:
+            # Pot is active — use today's forecast balance
+            today_forecast = df[df["Date"] == today]["Forecast Balance"]
+            if not today_forecast.empty:
+                pot_total_budget += today_forecast.values[0]
+            else:
+                # Fallback if exact date missing (shouldn't happen, but safe)
+                df["Date_Diff"] = (df["Date"] - today).abs()
+                closest_row = df.loc[df["Date_Diff"].idxmin()]
+                pot_total_budget += closest_row["Forecast Balance"]
+    
+    # --- Calculate status amount ---
+    status_amount = pot_total_budget - pot_total_balance
+    print(f"pot_total_budget: {pot_total_budget}")
+    print(f"pot_total_balance: {pot_total_balance}")
+    
+    # --- Determine status color ---
+    if pot_total_balance == pot_total_budget:
+        status_color = colors[2]  # black  
+    elif pot_total_balance >= pot_total_budget:
+        status_color = colors[0]  # green    
+    else:
+        status_color = colors[1]  # red
+
+    status_amount = abs(round(status_amount))
+    
+    status.append(status_color)
+    status.append(status_amount)
+    
+    return status
