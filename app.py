@@ -3,7 +3,7 @@ import pandas as pd
 import streamlit as st
 
 from project_classes import User,Vault,Pot,Transaction,Balances
-from project_functions import submit_transaction,convert_date,summary,create_pot,create_user,create_vault,create_profile,re_user,re_vaults,re_pots,re_transactions,re_balances,count_pots,count_transactions,count_vaults,transaction_summary,del_profile,del_vault,del_pot,del_transaction,user_exist,refresh_user_data,refresh_pot_vault_values,balance_update,auto_transaction,previous_balances_variable,pot_forecast,pot_dict,update_pot,update_transaction,active_pot_dict,balance_transaction,undo_last_balance,currency_convert,financial_status
+from project_functions import submit_transaction,convert_date,summary,create_pot,create_user,create_vault,create_profile,re_user,re_vaults,re_pots,re_transactions,re_balances,count_pots,count_transactions,count_vaults,transaction_summary,del_profile,del_vault,del_pot,del_transaction,user_exist,refresh_user_data,refresh_pot_vault_values,balance_update,auto_transaction,previous_balances_variable,pot_forecast,pot_dict,update_pot,update_transaction,active_pot_dict,balance_transaction,undo_last_balance,currency_convert,financial_status,generate_forecast_bmp,generate_summary_bmp
 from streamlit_option_menu import option_menu
 from tabulate import tabulate
 from time import sleep
@@ -237,25 +237,18 @@ if selected == "Dashboard":
     pots,vaults = refresh_pot_vault_values(pots,vaults)
     
     if display_graph == "Pot Spending Forecast":
-        status = financial_status(pots)
         # Title
-        col1,col2,col3 = st.columns([1.75,2.25,1])
-        with col2:
-            st.markdown(f"""<h3 style='color: black; font-weight: bold;'>Active Pot Spending Forecast</h3>""", unsafe_allow_html=True)
-        # Message
-        col1,col2,col3 = st.columns([2.65,2.25,1])
-        with col2:
-            st.markdown(f"""<h3 style='color: {status[0]}; font-weight: normal;'>${status[1]} in the {status[0]}</h3>""", unsafe_allow_html=True)
+        status = financial_status(pots)
+        bmp_image = generate_forecast_bmp(status)
+        st.image(bmp_image, width='content')
         # Plot Forecast
         fig = pot_forecast(con,pots,active_pot,balances,transactions)
         st.pyplot(fig)
 
     else:
         # Title
-        col1,col2,col3 = st.columns([2.1,2.4,1])
-        with col2:
-            st.markdown(f"""<h3 style='color: black; font-weight: bold;'>Summary of Pot Balances</h3>""", unsafe_allow_html=True)
-        
+        bmp_image = generate_summary_bmp()
+        st.image(bmp_image, width='content')
         # Plot summary chart
         fig = summary(vaults, pots, dynamic_width=True)
 

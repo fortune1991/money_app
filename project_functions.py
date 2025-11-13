@@ -1,4 +1,4 @@
-import datetime,os,sqlite3,math
+import datetime,io,os,sqlite3,math
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import plotly.express as px
@@ -9,6 +9,7 @@ import requests
 import seaborn as sns
 import streamlit as st
 from datetime import timedelta
+from PIL import Image, ImageDraw, ImageFont
 from project_classes import User,Vault,Pot,Transaction,Balances
 from streamlit_option_menu import option_menu
 from tabulate import tabulate
@@ -1258,7 +1259,6 @@ def financial_status(pots):
 
         # Create DataFrame of forecast
         df = pd.DataFrame(list(forecast_data.items()), columns=["Date", "Forecast Balance"])
-        print(df)
 
         # --- Determine which forecast value to use for today ---
         if today < start_date:
@@ -1282,8 +1282,6 @@ def financial_status(pots):
     
     # --- Calculate status amount ---
     status_amount = pot_total_budget - pot_total_balance
-    print(f"pot_total_budget: {pot_total_budget}")
-    print(f"pot_total_balance: {pot_total_balance}")
     
     # --- Determine status color ---
     if pot_total_balance == pot_total_budget:
@@ -1299,3 +1297,81 @@ def financial_status(pots):
     status.append(status_amount)
     
     return status
+
+def generate_forecast_bmp(status):
+    # status is a tuple like ("green", "500")
+    color = status[0]
+    value = status[1]
+
+    # --- Image settings ---
+    width, height = 1000, 50
+    background = "white"
+
+    # Create blank image
+    img = Image.new("RGB", (width, height), background)
+    draw = ImageDraw.Draw(img)
+
+    # Load fonts (fallback to default if not found)
+    title_font = ImageFont.load_default(28)
+    text_font = ImageFont.load_default(28)
+
+    # --- Text content ---
+    title_text = "Active Pot Spending Forecast "
+    message_text = f"${value} in the {color}"
+    text_content = title_text + message_text
+
+    # --- Measure text sizes (new method) ---
+    text_bbox = draw.textbbox((0, 0), text_content, font=title_font)
+
+    text_w = text_bbox[2] - text_bbox[0]
+    text_h = text_bbox[3] - text_bbox[1]
+
+    # --- Centered positioning ---
+    text_x = ((width - text_w) / 2) + 30
+    text_y = (height / 2) - 10
+
+    # --- Draw text ---
+    draw.text((text_x, text_y), title_text, fill="black", font=title_font)
+    draw.text((text_x + 400, text_y), message_text, fill=color, font=text_font)
+
+    # --- Output as BMP (for Streamlit) ---
+    output = io.BytesIO()
+    img.save(output, format="BMP")
+    output.seek(0)
+
+    return output
+
+def generate_summary_bmp():
+    # --- Image settings ---
+    width, height = 1000, 50
+    background = "white"
+
+    # Create blank image
+    img = Image.new("RGB", (width, height), background)
+    draw = ImageDraw.Draw(img)
+
+    # Load fonts (fallback to default if not found)
+    title_font = ImageFont.load_default(28)
+
+    # --- Text content ---
+    text_content = "Summary of Pot Balances"
+
+    # --- Measure text sizes (new method) ---
+    text_bbox = draw.textbbox((0, 0), text_content, font=title_font)
+
+    text_w = text_bbox[2] - text_bbox[0]
+    text_h = text_bbox[3] - text_bbox[1]
+
+    # --- Centered positioning ---
+    text_x = ((width - text_w) / 2) + 33
+    text_y = (height / 2) - 10
+
+    # --- Draw text ---
+    draw.text((text_x, text_y), text_content, fill="black", font=title_font)
+    
+    # --- Output as BMP (for Streamlit) ---
+    output = io.BytesIO()
+    img.save(output, format="BMP")
+    output.seek(0)
+
+    return output
