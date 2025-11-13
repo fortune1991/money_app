@@ -1241,6 +1241,7 @@ def financial_status(pots):
     status = []    
     
     for pot in pots.values():
+        tomorrow_forecast = None  #reset each iteration
         # --- Pot balance ---
         pot_balance = pot.pot_value()
         pot_total_balance += pot_balance
@@ -1252,7 +1253,7 @@ def financial_status(pots):
         current_date = start_date
         amount = pot.amount
         
-        while current_date <= end_date:
+        while current_date < end_date:
             forecast_data[current_date] = amount
             current_date += timedelta(days=1)
             amount -= pot.daily_expenditure
@@ -1270,15 +1271,17 @@ def financial_status(pots):
             pot_total_budget += 0
 
         else:
-            # Pot is active — use today's forecast balance
-            today_forecast = df[df["Date"] == today]["Forecast Balance"]
-            if not today_forecast.empty:
-                pot_total_budget += today_forecast.values[0]
+            tomorrow = today + pd.Timedelta(days=1)
+            if tomorrow > end_date:
+                pot_total_budget += 0
             else:
-                # Fallback if exact date missing (shouldn't happen, but safe)
-                df["Date_Diff"] = (df["Date"] - today).abs()
-                closest_row = df.loc[df["Date_Diff"].idxmin()]
-                pot_total_budget += closest_row["Forecast Balance"]
+                tomorrow_forecast = df[df["Date"] == tomorrow]["Forecast Balance"]
+                if not tomorrow_forecast.empty:
+                    pot_total_budget += tomorrow_forecast.values[0]
+                else:
+                    df["Date_Diff"] = (df["Date"] - tomorrow).abs()
+                    closest_row = df.loc[df["Date_Diff"].idxmin()]
+                    pot_total_budget += closest_row["Forecast Balance"]
     
     # --- Calculate status amount ---
     status_amount = pot_total_budget - pot_total_balance
