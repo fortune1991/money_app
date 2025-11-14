@@ -121,7 +121,7 @@ class Pot:
         self.username = user.username
         self.start_date = start_date
         self.end_date = end_date
-        self.date_delta = round((self.end_date - self.start_date).days)
+        self.date_delta = round((self.end_date - self.start_date).days) + 1
         # Avoid division by zero
         if self.date_delta <= 0:
             raise ValueError("End date must be after start date")

@@ -253,7 +253,7 @@ def submit_transaction(con,transaction_id,pots,vaults,user,username,transaction_
         except Exception as e:  
             print(f"An unexpected error occurred: {e}")
     else:
-        print(f"pot '{pot_input}' not found. Please enter a valid pot name.")
+        print(f"pot '{pot_name}' not found. Please enter a valid pot name.")
 
 def update_transaction(con, transaction_id, pots, vaults, user, username, transaction_name, pot_name, date, amount, transaction_type):
     # Handle None or invalid transaction_id
@@ -1010,112 +1010,125 @@ def previous_balances_variable(con,username):
     cur.close()
     return previous_balances
 
-def pot_forecast(con, pots, pot_name, balances, transactions, dynamic_width=True):
-    # Assign pot to a variable
-    pot = next((p for p in pots.values() if p.pot_name == pot_name), None)
-    if pot is None:
-        forecast_data = {}
-        start_date = convert_date("2025-01-01")
-        end_date = convert_date("2025-03-01")
-        date = start_date
-        amount = 0.00
-        while date <= end_date:
-            forecast_data[date] = amount
-            date += timedelta(days=1)
-            amount -= 0
-    else:
-        # Prepare forecast data
-        forecast_data = {}
-        start_date = pot.start_date
-        end_date = pot.end_date
-        date = start_date
-        amount = pot.amount
-        while date <= end_date:
-            forecast_data[date] = amount
-            date += timedelta(days=1)
-            amount -= pot.daily_expenditure
-
-    df = pd.DataFrame(list(forecast_data.items()), columns=["Date", "Forecast Balance"])
+def build_forecast(pots):
+    """Build forecast data using planned daily expenditures"""
+    total_budget = sum(pot.amount for pot in pots.values() if pot)
+    forecast_data = []
     
-    # Prepare actual balance data
-    if pot is None:
-        actual_balance = 0
-        actual_date = convert_date("2025-01-01")
-    else:
-        # Set pot_budget using pot object
-        pot_budget = pot.amount
+    # Get overall date range
+    all_start_dates = [pot.start_date for pot in pots.values() if pot]
+    all_end_dates = [pot.end_date for pot in pots.values() if pot]
+    
+    if not all_start_dates:
+        return forecast_data
+    
+    start_date = min(all_start_dates)
+    end_date = max(all_end_dates)
+    
+    # Create a dictionary to track remaining budget for each pot
+    pot_budgets = {}
+    for pot_id, pot in pots.items():
+        if pot:
+            pot_budgets[pot_id] = pot.amount
+    
+    current_date = start_date
+    
+    while current_date <= end_date:
+        daily_total_spend = 0.0
         
-        # FILTER TRANSACTIONS FOR THIS SPECIFIC POT USING THE TRANSACTIONS DICTIONARY
-        pot_transactions = []
-        for transaction_obj in transactions.values():
-            # Check if this transaction belongs to our pot AND is not a balance transaction
-            if (hasattr(transaction_obj, 'pot_id') and transaction_obj.pot_id == pot.pot_id and 
-                transaction_obj.balance_transaction == 0):  # Exclude balance transactions
-                pot_transactions.append({
-                    "Date": transaction_obj.date,
-                    "Type": transaction_obj.type,  # "in" or "out"
-                    "Amount": transaction_obj.amount
-                })
+        # Calculate total daily spend from all active pots on this date
+        for pot_id, pot in pots.items():
+            if pot and pot.start_date <= current_date <= pot.end_date:
+                # Only spend from pots that still have budget
+                if pot_budgets[pot_id] > 0:
+                    daily_spend = min(pot.daily_expenditure, pot_budgets[pot_id])
+                    daily_total_spend += daily_spend
+                    pot_budgets[pot_id] -= daily_spend
         
-        if not pot_transactions:
-            # No transactions for this pot - just use starting budget
-            balances_df = pd.DataFrame({
-                "Date": [pd.Timestamp(start_date)],
-                "Remaining_Budget": [pot_budget]
-            })
-        else:
-            # Create transactions DataFrame from the filtered transactions
-            transactions_df = pd.DataFrame(pot_transactions)
-            
-            # Convert dates to datetime
-            transactions_df["Date"] = pd.to_datetime(transactions_df["Date"])
-            
-            # Calculate daily net spending
-            # "out" transactions decrease budget, "in" transactions increase budget
-            daily_summary = transactions_df.groupby("Date").apply(
-                lambda x: pd.Series({
-                    "Net_Spend": (x.loc[x["Type"] == "out", "Amount"].sum()) +  # Spending decreases budget
-                                x.loc[x["Type"] == "in", "Amount"].sum()        # Deposits increase budget
-                }),
-                include_groups=False  # Add this to silence the warning
-            ).reset_index()
-            
-            # Create a date range from pot start to today or pot end
-            today = pd.Timestamp(datetime.date.today())
-            end_date_ts = pd.Timestamp(end_date)
-            last_date = today if today < end_date_ts else end_date_ts
-            
-            date_range = pd.date_range(start=pd.Timestamp(start_date), end=last_date, freq='D')
-            date_df = pd.DataFrame({"Date": date_range})
-            
-            # Merge with daily summary
-            balances_df = date_df.merge(daily_summary, on="Date", how="left")
-            balances_df["Net_Spend"] = balances_df["Net_Spend"].fillna(0)
-            
-            # Calculate cumulative spending and remaining budget
-            balances_df["Cumulative_Spend"] = balances_df["Net_Spend"].cumsum()
-            balances_df["Remaining_Budget"] = pot_budget + balances_df["Cumulative_Spend"]  # ADD because Net_Spend can be negative
-            
-            # Ensure we start at the full budget
-            balances_df.loc[balances_df["Date"] == pd.Timestamp(start_date), "Remaining_Budget"] = pot_budget
+        forecast_data.append([current_date, total_budget])
+        total_budget -= daily_total_spend
+        current_date += timedelta(days=1)
+    
+    return forecast_data
 
-        balances_df = balances_df[["Date", "Remaining_Budget"]]
+def build_balances(pots, transactions):
+    """Build actual balances data using transaction history"""
+    total_budget = pot_total_budget(pots)
+    balances_data = []
+    
+    # Get today's date
+    today = datetime.date.today()
+    
+    # Get all unique dates across all pot periods AND transaction dates
+    all_dates = set()
+    
+    # Add all pot period dates
+    for pot in pots.values():
+        if pot:
+            current_date = pot.start_date
+            while current_date <= pot.end_date:
+                all_dates.add(current_date)
+                current_date += timedelta(days=1)
+    
+    # Add all transaction dates
+    for transaction in transactions.values():
+        if isinstance(transaction, Transaction):
+            all_dates.add(transaction.date)
+    
+    if not all_dates:
+        return balances_data
+    
+    # Sort dates chronologically
+    sorted_dates = sorted(all_dates)
+    
+    # Group transactions by date
+    daily_transactions = {}
+    for transaction in transactions.values():
+        if not isinstance(transaction, Transaction):
+            continue
+        if transaction.balance_transaction == 1:
+            continue
+            
+        tx_date = transaction.date
+        tx_amount = transaction.amount
+        
+        if transaction.type == "out":
+            amount = -abs(tx_amount)
+        else:  # "in"
+            amount = abs(tx_amount)
+        
+        if tx_date not in daily_transactions:
+            daily_transactions[tx_date] = 0.0
+        daily_transactions[tx_date] += amount
+    
+    # Build timeline
+    current_balance = total_budget
+    
+    for date in sorted_dates:
+        # Stop at today
+        if date > today:
+            break
+            
+        # Apply transactions for this date
+        daily_net = daily_transactions.get(date, 0.0)
+        current_balance += daily_net
+        
+        # Add entry for this date
+        entry = [date, current_balance] 
+        balances_data.append(entry)
+    
+    return balances_data
 
-    # --- Align actual balances to forecast start date ---
-    df["Date"] = pd.to_datetime(df["Date"])
-    balances_df["Date"] = pd.to_datetime(balances_df["Date"])
+def pot_forecast(con, pots, pot_name, balances, transactions, dynamic_width=True):
+    # Build Forecast Data Frame
+    forecast_data = build_forecast(pots)
+    forecast_df = pd.DataFrame(forecast_data, columns=["Date", "Forecast Balance"])
 
-    # Ensure we have a point at the forecast start date
-    forecast_start = df["Date"].min()
-    if forecast_start not in balances_df["Date"].values:
-        new_row = pd.DataFrame({
-            "Date": [pd.Timestamp(forecast_start)],
-            "Remaining_Budget": [pot_budget]
-        })
-        balances_df = pd.concat([new_row, balances_df], ignore_index=True)
-        balances_df = balances_df.sort_values("Date", ignore_index=True)
+    # Build Actual Balances Data
+    balances_data = build_balances(pots, transactions)
+    balances_df = pd.DataFrame(balances_data, columns=["Date", "Actual Balance"])
 
-    # --- Seaborn theme ---
+    # Plot Graph
     sns.set_theme(style="darkgrid", palette="Blues_d")
     plt.rcParams.update({
         "axes.titlesize": 14,
@@ -1129,34 +1142,86 @@ def pot_forecast(con, pots, pot_name, balances, transactions, dynamic_width=True
         "font.size": 11,
     })
 
-    # --- Create figure ---
-    fig, ax = plt.subplots(figsize=(8, 6))
+    fig, ax = plt.subplots(figsize=(10, 6))
 
-    # Plot forecast
-    ax.plot(df["Date"], df["Forecast Balance"], color="#61b27eff", linewidth=2.5, label="Forecast Balance")
-    # Plot actual
-    ax.plot(balances_df["Date"], balances_df["Remaining_Budget"], color="#fdb43fff", linewidth=2.5, linestyle="--", label="Actual Balance")
+    # Calculate y_max safely
+    y_max_values = []
+    
+    if not forecast_df.empty and not forecast_df["Forecast Balance"].isna().all():
+        y_max_values.append(forecast_df["Forecast Balance"].max())
+    
+    if not balances_df.empty and not balances_df["Actual Balance"].isna().all():
+        y_max_values.append(balances_df["Actual Balance"].max())
+    
+    # Set default y_max if no valid data
+    if y_max_values:
+        y_max = max(y_max_values)
+    else:
+        y_max = 1000  # Default value when no data
+    
+    # Forecast line (green) - only if we have forecast data
+    if not forecast_df.empty and not forecast_df["Forecast Balance"].isna().all():
+        ax.plot(forecast_df["Date"], forecast_df["Forecast Balance"],
+                color="#61b27eff", linewidth=2.5, label="Forecast Balance")
 
-    # Highlight last actual point
-    last_row = balances_df.iloc[-1]
-    ax.scatter(last_row["Date"], last_row["Remaining_Budget"], color="#fdb43fff", s=100, edgecolor="white", linewidth=1.5, zorder=5)
+    # Actual line (orange) - only if we have actual data
+    if not balances_df.empty and not balances_df["Actual Balance"].isna().all():
+        ax.plot(balances_df["Date"], balances_df["Actual Balance"],
+                color="#fdb43fff", linewidth=2.5, linestyle="--", label="Actual Balance")
 
-    # Style axes
+        # Highlight last actual point with time-based positioning
+        last_row = balances_df.iloc[-1]
+        current_time = datetime.datetime.now().time()
+        
+        # Discrete positions based on time of day
+        if current_time.hour < 12:
+            time_label = "Morning"
+            x_offset = 0.25  # 25% through the day
+        elif current_time.hour < 18:
+            time_label = "Afternoon" 
+            x_offset = 0.5   # 50% through the day
+        else:
+            time_label = "Evening"
+            x_offset = 0.75  # 75% through the day
+        
+        dot_date = last_row["Date"] + datetime.timedelta(days=x_offset)
+        
+        ax.scatter(dot_date, last_row["Actual Balance"],
+                   color="#fdb43fff", s=100, edgecolor="white",
+                   linewidth=1.5, zorder=5, label=f"Current Balance ({time_label})")
+
+    # Add pot name labels only if we have pots
+    valid_pots = [pot for pot in pots.values() if pot is not None]
+    if valid_pots and y_max > 0:
+        for pot in valid_pots:
+            # Add vertical line at pot start date
+            ax.axvline(x=pot.start_date, color='gray', linestyle=':', alpha=0.7, linewidth=1)
+            
+            # Add pot name label to the RIGHT of the line
+            date_delta = pot.end_date - pot.start_date
+            label_date = pot.start_date + date_delta / 2
+            ax.text(label_date, y_max * 1.02, pot.pot_name, 
+                   ha='left', va='bottom', fontsize=10, fontweight='bold',  
+                   bbox=dict(boxstyle="round,pad=0.3", facecolor="white", alpha=0.7))
+
+    # Axes & formatting with safe limits
     ax.set_xlabel("Date")
     ax.set_ylabel("Balance ($)")
-    ax.set_ylim(bottom=0)
-
+    
+    # Set safe y-axis limits
+    if y_max > 0:
+        ax.set_ylim(bottom=0, top=y_max * 1.1)
+    else:
+        ax.set_ylim(bottom=0, top=1000)  # Default range
+    
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %d"))
     plt.gcf().autofmt_xdate()
-
-    # Legend
     ax.legend(title="Key", bbox_to_anchor=(0.5, -0.2), loc="upper center", ncol=2)
-
     sns.despine(left=True, bottom=True)
     plt.tight_layout()
 
     return fig
-    
+
 def pot_dict(pots):
     pot_dict = {}
     for pot in pots.values():
@@ -1378,3 +1443,9 @@ def generate_summary_bmp():
     output.seek(0)
 
     return output
+
+def pot_total_budget(pots):
+    pot_total_budget = 0
+    for pot in pots.values():
+        pot_total_budget += pot.amount
+    return pot_total_budget

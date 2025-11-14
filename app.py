@@ -3,7 +3,7 @@ import pandas as pd
 import streamlit as st
 
 from project_classes import User,Vault,Pot,Transaction,Balances
-from project_functions import submit_transaction,convert_date,summary,create_pot,create_user,create_vault,create_profile,re_user,re_vaults,re_pots,re_transactions,re_balances,count_pots,count_transactions,count_vaults,transaction_summary,del_profile,del_vault,del_pot,del_transaction,user_exist,refresh_user_data,refresh_pot_vault_values,balance_update,auto_transaction,previous_balances_variable,pot_forecast,pot_dict,update_pot,update_transaction,active_pot_dict,balance_transaction,undo_last_balance,currency_convert,financial_status,generate_forecast_bmp,generate_summary_bmp
+from project_functions import submit_transaction,convert_date,summary,create_pot,re_user,count_pots,count_transactions,del_pot,del_transaction,user_exist,refresh_user_data,refresh_pot_vault_values,balance_update,auto_transaction,pot_forecast,pot_dict,update_pot,update_transaction,active_pot_dict,balance_transaction,undo_last_balance,currency_convert,financial_status,generate_forecast_bmp,generate_summary_bmp
 from streamlit_option_menu import option_menu
 from tabulate import tabulate
 from time import sleep
@@ -435,7 +435,7 @@ elif selected == "Budgets":
             st.rerun()
 
         # Now calculate number of days
-        df_calc["Number of Days"] = (df_calc["End Date"] - df_calc["Start Date"]).dt.days
+        df_calc["Number of Days"] = (df_calc["End Date"] - df_calc["Start Date"]).dt.days + 1
 
         # Start by checking the database
         next_id = count_pots(con)
