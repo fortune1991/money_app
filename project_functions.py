@@ -133,7 +133,15 @@ def auto_transaction(con, pots, vaults, user, username, balances, previous_balan
         return None  # nothing to do: already created
 
     # Calculate signed delta
-    delta = balances.combined_balance(balances) - previous_balances.combined_balance(previous_balances)
+    if balances.cash_currency == balances.bank_currency:
+        delta = balances.combined_balance(balances) - previous_balances.combined_balance(previous_balances)
+    else:
+        current_balance_cash = currency_convert(balances.bank_currency, balances.cash_currency, balances.cash_balance)
+        current_balance = balances.bank_balance + current_balance_cash
+        previous_balance_cash = currency_convert(previous_balances.bank_currency, previous_balances.cash_currency, previous_balances.cash_balance)
+        previous_balance = previous_balances.bank_balance + previous_balance_cash
+        delta = current_balance - previous_balance
+
     if delta == 0:
         return None  # No change, exit
 
@@ -1074,7 +1082,7 @@ def build_balances(pots, transactions):
     for transaction in transactions.values():
         if isinstance(transaction, Transaction):
             all_dates.add(transaction.date)
-    
+        
     if not all_dates:
         return balances_data
     
@@ -1122,7 +1130,10 @@ def build_balances(pots, transactions):
 def pot_forecast(con, pots, pot_name, balances, transactions, dynamic_width=True):
     # Build Forecast Data Frame
     forecast_data = build_forecast(pots)
+    # Shift green line to the left
+    forecast_df_original = pd.DataFrame(forecast_data, columns=["Date", "Forecast Balance"])
     forecast_df = pd.DataFrame(forecast_data, columns=["Date", "Forecast Balance"])
+    forecast_df["Date"] = pd.to_datetime(forecast_df["Date"]) - pd.Timedelta(days=1)
 
     # Build Actual Balances Data
     balances_data = build_balances(pots, transactions)
